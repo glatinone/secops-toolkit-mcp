@@ -1,6 +1,6 @@
 [project]
 name = "secops-toolkit-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "An MCP server of local, defensive SecOps helpers: IOC extraction, defang/refang, hashing, password entropy, and CIDR math."
 readme = "README.md"
 license = "MIT"

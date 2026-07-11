@@ -1,5 +1,8 @@
 # SecOps Toolkit MCP
 
+[![CI](https://github.com/glatinone/secops-toolkit-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/glatinone/secops-toolkit-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A small, dependency-light [Model Context Protocol](https://modelcontextprotocol.io)
 server that gives an AI assistant a set of **defensive security helpers** for
 working with logs, threat-intel notes, and network data — all running locally,
