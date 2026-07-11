@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- README: Quickstart, worked Examples for every tool with real input/output,
+  a Docker usage section, and a Troubleshooting section.
+
 ## [0.2.0] - 2026-07-11
 
 ### Added
