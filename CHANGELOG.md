@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- CI: bumped `actions/checkout` (v4 → v7) and `astral-sh/setup-uv` (v4 → v8)
-  to clear a Node.js 20 deprecation warning noted since the v0.2.0 CI setup.
+- CI: bumped `actions/checkout` (v4 → v7) and `astral-sh/setup-uv` (v4 →
+  v8.3.2, pinned to the full tag since `astral-sh/setup-uv` doesn't publish a
+  floating `v8` major-version alias yet) to clear a Node.js 20 deprecation
+  warning noted since the v0.2.0 CI setup.
 
 ## [0.3.0] - 2026-07-19
 
