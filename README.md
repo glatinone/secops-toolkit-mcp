@@ -1,6 +1,7 @@
 # SecOps Toolkit MCP
 
 [![CI](https://github.com/glatinone/secops-toolkit-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/glatinone/secops-toolkit-mcp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/glatinone/secops-toolkit-mcp)](https://github.com/glatinone/secops-toolkit-mcp/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A small, dependency-light [Model Context Protocol](https://modelcontextprotocol.io)
@@ -179,6 +180,9 @@ uv run pytest    # run the test suite
 The logic lives in [`core.py`](src/secops_toolkit_mcp/core.py) as plain,
 testable functions; [`server.py`](src/secops_toolkit_mcp/server.py) is a thin
 layer that exposes them as MCP tools.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow for adding a new
+tool, and [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 

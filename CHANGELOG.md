@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `CONTRIBUTING.md`: project layout, how to add a new tool, and design
+  principles (no API keys / no outbound network calls, dependency-light,
+  fail loudly on bad input).
+- Release badge in the README, alongside the existing CI and License badges.
+
+### Changed
+
+- CI: bumped `actions/checkout` (v4 → v7) and `astral-sh/setup-uv` (v4 → v8)
+  to clear a Node.js 20 deprecation warning noted since the v0.2.0 CI setup.
+
 ## [0.3.0] - 2026-07-19
 
 ### Added
