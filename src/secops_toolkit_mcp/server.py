@@ -73,6 +73,23 @@ def ip_in_cidr(ip: str, cidr: str) -> bool:
     return core.ip_in_cidr(ip, cidr)
 
 
+@mcp.tool
+def scan_repo_root(path: str) -> dict[str, object]:
+    """Check a repo's top-level directory for files that shadow common
+    developer command names (``git.exe``, ``node.exe``, ``npm.cmd``, etc.).
+
+    Run this before opening a freshly cloned or downloaded repository in an
+    agentic coding tool. On Windows, several tools (Cursor, GitHub Copilot
+    CLI, Gemini CLI, Codex) resolve an unqualified command like ``git`` from
+    the current directory before PATH, so a malicious repo shipping its own
+    ``git.exe`` at the root runs instead of the real one, before any
+    workspace-trust prompt appears. Severity: critical for ``git`` (the
+    confirmed vector), high for shells/interpreters, medium for other common
+    dev tools. Only the top-level directory is checked, not subdirectories.
+    """
+    return core.scan_repo_root(path)
+
+
 def main() -> None:
     """Entry point: run the MCP server over stdio."""
     mcp.run()

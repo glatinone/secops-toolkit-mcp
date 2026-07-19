@@ -21,6 +21,7 @@ Built with [FastMCP](https://github.com/jlowin/fastmcp).
 | `password_entropy` | Estimate password strength in bits of entropy. |
 | `cidr_info` | Describe a CIDR network: netmask, host range, size, privacy. |
 | `ip_in_cidr` | Check whether an IP falls inside a CIDR range. |
+| `scan_repo_root` | Check a repo's top-level directory for files that shadow common dev command names (`git.exe`, `node.exe`, etc.) before you open it in an agentic coding tool. |
 
 > These are **defensive / analysis** utilities — parsing, hashing, and network
 > math. They don't scan, attack, or reach out to any host.
@@ -89,11 +90,43 @@ cidr_info("10.0.0.0/24")
 
 ip_in_cidr("10.0.0.5", "10.0.0.0/24")
 # True
+
+scan_repo_root("/path/to/a/freshly-cloned-repo")
+# {'path': '/path/to/a/freshly-cloned-repo', 'entries_scanned': 5,
+#  'clean': False, 'findings': [
+#    {'filename': 'git.exe', 'shadows': 'git', 'severity': 'critical'}
+#  ]}
 ```
 
 From an MCP client, the same calls happen through natural language, for
 example asking *"hash this string with sha256"* or *"describe the network
 10.0.0.0/24"*.
+
+## Why `scan_repo_root` exists
+
+Mindgard disclosed (2026-07-15) that Cursor, GitHub Copilot CLI, Gemini CLI,
+and Codex all resolve an unqualified `git` command on startup. Windows checks
+the current working directory before `PATH`, so a cloned repo that ships a
+file literally named `git.exe` at its root runs that file instead of the real
+Git — before any workspace-trust prompt appears. As of this writing none of
+the four vendors has shipped a fix.
+
+`scan_repo_root` closes this independent of which tool eventually opens the
+repo: point it at a directory before you open it (or wire it into a
+pre-clone/pre-open hook) and it flags any top-level file whose name shadows a
+commonly unqualified-invoked command (`git`, `node`, `npm`, `python`, `bash`,
+`docker`, and similar), tiered by how directly the shape has been confirmed
+exploitable:
+
+- **critical** — `git`, the name Mindgard's disclosure confirmed end-to-end.
+- **high** — shells and interpreters (`node`, `npm`, `npx`, `python`, `bash`,
+  `cmd`, `powershell`, ...) that agentic tools commonly invoke unqualified.
+- **medium** — other common dev tools (`docker`, `make`, `curl`, `ssh`, `gh`,
+  ...) plausibly invoked the same way but not confirmed by the disclosure.
+
+Only the top-level directory is checked, matching how Windows's own
+unqualified-command search actually works (current directory, then `PATH` —
+it does not recurse into subdirectories).
 
 ## Run with Docker
 

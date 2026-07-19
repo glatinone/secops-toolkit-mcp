@@ -139,3 +139,73 @@ def test_ip_in_cidr_true_and_false():
 def test_ip_in_cidr_rejects_bad_ip():
     with pytest.raises(ValueError, match="invalid IP address"):
         core.ip_in_cidr("999.999.999.999", "192.168.1.0/24")
+
+
+# --- scan_repo_root ---------------------------------------------------------
+
+
+def test_scan_repo_root_clean_directory(tmp_path):
+    (tmp_path / "README.md").write_text("hello")
+    (tmp_path / "main.py").write_text("print('hi')")
+    result = core.scan_repo_root(str(tmp_path))
+    assert result["clean"] is True
+    assert result["findings"] == []
+    assert result["entries_scanned"] == 2
+
+
+def test_scan_repo_root_flags_git_exe_as_critical(tmp_path):
+    (tmp_path / "git.exe").write_bytes(b"MZ")
+    result = core.scan_repo_root(str(tmp_path))
+    assert result["clean"] is False
+    assert result["findings"] == [
+        {"filename": "git.exe", "shadows": "git", "severity": "critical"}
+    ]
+
+
+def test_scan_repo_root_is_case_insensitive(tmp_path):
+    (tmp_path / "GIT.EXE").write_bytes(b"MZ")
+    result = core.scan_repo_root(str(tmp_path))
+    assert result["findings"][0]["shadows"] == "git"
+    assert result["findings"][0]["severity"] == "critical"
+
+
+def test_scan_repo_root_flags_shell_and_tool_names_by_tier(tmp_path):
+    (tmp_path / "node.cmd").write_bytes(b"")
+    (tmp_path / "docker.bat").write_bytes(b"")
+    result = core.scan_repo_root(str(tmp_path))
+    by_name = {f["filename"]: f["severity"] for f in result["findings"]}
+    assert by_name["node.cmd"] == "high"
+    assert by_name["docker.bat"] == "medium"
+
+
+def test_scan_repo_root_ignores_non_executable_extension(tmp_path):
+    (tmp_path / "git.txt").write_text("not an exe")
+    result = core.scan_repo_root(str(tmp_path))
+    assert result["clean"] is True
+
+
+def test_scan_repo_root_ignores_unrelated_executable_name(tmp_path):
+    (tmp_path / "setup.exe").write_bytes(b"MZ")
+    result = core.scan_repo_root(str(tmp_path))
+    assert result["clean"] is True
+
+
+def test_scan_repo_root_only_checks_top_level(tmp_path):
+    nested = tmp_path / "vendor"
+    nested.mkdir()
+    (nested / "git.exe").write_bytes(b"MZ")
+    result = core.scan_repo_root(str(tmp_path))
+    assert result["clean"] is True
+    assert result["entries_scanned"] == 0
+
+
+def test_scan_repo_root_rejects_missing_path(tmp_path):
+    with pytest.raises(ValueError, match="path does not exist"):
+        core.scan_repo_root(str(tmp_path / "does-not-exist"))
+
+
+def test_scan_repo_root_rejects_a_file_path(tmp_path):
+    f = tmp_path / "not_a_dir.txt"
+    f.write_text("x")
+    with pytest.raises(ValueError, match="not a directory"):
+        core.scan_repo_root(str(f))

@@ -11,6 +11,7 @@ import hashlib
 import ipaddress
 import math
 import re
+from pathlib import Path
 
 # --- Indicator-of-compromise (IOC) extraction -----------------------------
 
@@ -212,6 +213,84 @@ def cidr_info(cidr: str) -> dict[str, object]:
     if net.version == 4:
         info["broadcast"] = str(net.broadcast_address)
     return info
+
+
+# --- Repo-root binary masquerading -----------------------------------------
+
+# Mindgard's disclosure (2026-07-15) found Cursor, GitHub Copilot CLI, Gemini
+# CLI, and Codex all resolve an unqualified `git` command on startup, and
+# Windows's process-creation search order checks the current working
+# directory before PATH. A cloned repo that ships a file literally named
+# `git.exe` at its root therefore runs attacker code the instant one of those
+# tools opens it, before any workspace-trust prompt appears. This check looks
+# for that same shape against any commonly unqualified-invoked binary name,
+# not just `git`.
+
+# `git` is the name the disclosure confirmed exploitable end-to-end.
+_CRITICAL_SHADOW_NAMES = {"git"}
+# Shells and interpreters agentic coding tools commonly invoke unqualified.
+_HIGH_SHADOW_NAMES = {
+    "node", "npm", "npx", "python", "python3", "pip", "pip3",
+    "bash", "sh", "cmd", "powershell", "pwsh",
+}
+# Other developer tools plausibly invoked unqualified by the same class of
+# startup/discovery code, but not confirmed by the disclosure itself.
+_MEDIUM_SHADOW_NAMES = {
+    "docker", "make", "curl", "wget", "ssh", "code", "gh", "yarn", "pnpm", "where",
+}
+
+# Extensions Windows resolves as directly executable from the current working
+# directory ahead of PATH. Script hosts that need an interpreter (.js, .vbs,
+# .wsf) are a different risk shape and out of scope here.
+_WINDOWS_EXECUTABLE_EXTENSIONS = {".exe", ".cmd", ".bat", ".com"}
+
+
+def scan_repo_root(path: str) -> dict[str, object]:
+    """Scan a directory's top-level entries for filenames that shadow common
+    developer-tool command names.
+
+    Run this before opening a freshly cloned or downloaded repository in an
+    agentic coding tool. Only the top level is checked (not recursively) —
+    that matches Windows's actual unqualified-command search order, which
+    looks at the current working directory, not subdirectories.
+
+    Raises ``ValueError`` if ``path`` does not exist or is not a directory.
+    """
+    directory = Path(path)
+    if not directory.exists():
+        raise ValueError(f"path does not exist: {path}")
+    if not directory.is_dir():
+        raise ValueError(f"not a directory: {path}")
+
+    findings: list[dict[str, str]] = []
+    entries_scanned = 0
+    for entry in sorted(directory.iterdir(), key=lambda p: p.name.lower()):
+        if not entry.is_file():
+            continue
+        entries_scanned += 1
+
+        suffix = entry.suffix.lower()
+        if suffix not in _WINDOWS_EXECUTABLE_EXTENSIONS:
+            continue
+
+        stem = entry.stem.lower()
+        if stem in _CRITICAL_SHADOW_NAMES:
+            severity = "critical"
+        elif stem in _HIGH_SHADOW_NAMES:
+            severity = "high"
+        elif stem in _MEDIUM_SHADOW_NAMES:
+            severity = "medium"
+        else:
+            continue
+
+        findings.append({"filename": entry.name, "shadows": stem, "severity": severity})
+
+    return {
+        "path": str(directory),
+        "entries_scanned": entries_scanned,
+        "clean": not findings,
+        "findings": findings,
+    }
 
 
 def ip_in_cidr(ip: str, cidr: str) -> bool:
