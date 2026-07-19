@@ -90,6 +90,31 @@ def scan_repo_root(path: str) -> dict[str, object]:
     return core.scan_repo_root(path)
 
 
+@mcp.tool
+def assess_shell_command(command: str) -> dict[str, object]:
+    """Assess a shell command for constructs that look benign to naive string
+    matching but execute something else once a shell actually expands them.
+
+    Closes the bypass class GuardFall (2026-06) confirmed against 10 of 11
+    popular open-source AI coding agents (Aider, Cline, Goose, Plandex, and
+    others): their command-safety guards check the raw string a model wrote,
+    not what the shell rewrites it into via quote removal, backslash escapes,
+    command substitution, and variable/IFS expansion. Never executes the
+    command or any part of it.
+
+    Tokenizes with real POSIX quote-removal rules so quote-fragmented or
+    backslash-obfuscated commands (``r'm' -rf /``) normalize to what actually
+    runs (``rm -rf /``) before any check. Flags command substitution
+    (``$(...)``, backticks, recursively assessed), unquoted variable
+    expansion, IFS manipulation, ANSI-C quoting, and a fetch-piped-to-
+    interpreter shape (``curl ... | sh``). Returns ``risk`` (``safe``,
+    ``suspicious``, or ``dangerous``), per-segment findings, and
+    ``bypassed_raw_pattern_match`` -- concrete evidence a normalized segment
+    caught something the raw text alone would have missed.
+    """
+    return core.assess_shell_command(command)
+
+
 def main() -> None:
     """Entry point: run the MCP server over stdio."""
     mcp.run()
