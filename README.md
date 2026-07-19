@@ -228,6 +228,28 @@ layer that exposes them as MCP tools.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow for adding a new
 tool, and [CHANGELOG.md](CHANGELOG.md) for release history.
 
+## Roadmap
+
+- [x] Initial tool set: IOC extraction, defang/refang, hashing, password
+  entropy, CIDR math (v0.1.0)
+- [x] CI on Python 3.11 to 3.13, CHANGELOG (v0.2.0)
+- [x] `scan_repo_root`, a pre-clone/pre-open check for binaries that shadow
+  common dev command names (v0.3.0), closing the Mindgard 2026-07-15
+  unqualified-`git` disclosure
+- [x] `assess_shell_command`, a shell command safety check that assesses
+  what a shell actually runs rather than the raw string a model wrote
+  (v0.4.0), closing the GuardFall 2026-06 bypass class
+- [ ] CLI entry point for `scan_repo_root`, so it can run standalone (a
+  pre-clone git hook, for example) without going through an MCP client
+- [ ] Widen `scan_repo_root`'s shadowed-name/extension coverage and
+  `assess_shell_command`'s denylist patterns as real-world use surfaces
+  gaps; both are intentionally high-signal, not exhaustive (see the module
+  comments in `core.py`)
+- [ ] PyPI packaging, once the same pattern is proven end to end on
+  [mcpscan](https://github.com/glatinone/mcpscan) first
+
+Contributions welcome, open an issue or PR.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
