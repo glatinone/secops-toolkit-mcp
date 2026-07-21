@@ -1,6 +1,6 @@
 [project]
 name = "secops-toolkit-mcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "An MCP server of local, defensive SecOps helpers: IOC extraction, defang/refang, hashing, password entropy, CIDR math, repo-root command-shadowing checks, and shell command safety assessment."
 readme = "README.md"
 license = "MIT"
@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 secops-toolkit-mcp = "secops_toolkit_mcp:main"
+secops-scan-repo = "secops_toolkit_mcp.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.25,<0.12.0"]

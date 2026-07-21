@@ -62,6 +62,36 @@ Add this to your client's MCP config (e.g. Claude Desktop's
 Then ask your assistant things like *"extract the IOCs from this alert"* or
 *"is 10.0.4.20 inside 10.0.0.0/16?"* and it will call these tools.
 
+## Standalone CLI: `secops-scan-repo`
+
+`scan_repo_root` is also available outside an MCP client, as its own console
+script, for the exact moment it matters most: right after you clone or
+download a repo and before you open it in an agentic coding tool.
+
+```bash
+uv run secops-scan-repo /path/to/a/freshly-cloned-repo
+# secops-scan-repo: /path/to/a/freshly-cloned-repo (5 top-level file(s) scanned)
+#
+#   [CRITICAL] git.exe shadows the 'git' command
+```
+
+Exits `0` on a clean directory, `1` if a finding is at or above
+`--min-severity` (default `medium`, i.e. any finding), `2` on a bad path.
+`-f/--format json` gives the same structure `scan_repo_root` returns, for
+scripting. This makes it a one-liner in a pre-clone git hook:
+
+```bash
+#!/bin/sh
+# .git/hooks/post-checkout (or a wrapper your clone script calls)
+secops-scan-repo "$(git rev-parse --show-toplevel)" || {
+  echo "secops-scan-repo: refusing to continue, see findings above" >&2
+  exit 1
+}
+```
+
+If installed system-wide (`uv tool install .` or `pip install .`), drop the
+`uv run` prefix and call `secops-scan-repo` directly.
+
 ## Examples
 
 The tools are plain functions in [`core.py`](src/secops_toolkit_mcp/core.py), so
@@ -239,8 +269,8 @@ tool, and [CHANGELOG.md](CHANGELOG.md) for release history.
 - [x] `assess_shell_command`, a shell command safety check that assesses
   what a shell actually runs rather than the raw string a model wrote
   (v0.4.0), closing the GuardFall 2026-06 bypass class
-- [ ] CLI entry point for `scan_repo_root`, so it can run standalone (a
-  pre-clone git hook, for example) without going through an MCP client
+- [x] `secops-scan-repo`, a standalone CLI for `scan_repo_root` (v0.5.0), so
+  it can run in a pre-clone git hook or CI step without an MCP client
 - [ ] Widen `scan_repo_root`'s shadowed-name/extension coverage and
   `assess_shell_command`'s denylist patterns as real-world use surfaces
   gaps; both are intentionally high-signal, not exhaustive (see the module

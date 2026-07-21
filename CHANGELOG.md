@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-21
+
+### Added
+
+- `secops-scan-repo`: a standalone CLI console script wrapping
+  `scan_repo_root`, so it can run in a pre-clone git hook or a CI step
+  without going through an MCP client — mirroring how mcpscan exposes both
+  a CLI and an MCP server over the same scanning logic. Supports `text`/
+  `json` output (`-f/--format`), a `--min-severity` threshold
+  (`medium`/`high`/`critical`, default `medium` — any finding), and exit
+  codes `0` (clean), `1` (finding at or above the threshold), `2` (bad
+  path). 9 new tests (55 total, was 46).
+
 ### Changed
 
 - README: added a Roadmap section (shipped vs. open items), matching the
@@ -96,7 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `password_entropy`, `cidr_info`, `ip_in_cidr` tools over FastMCP. Never tagged
   on GitHub — `0.2.0` is this project's first tagged release.
 
-[Unreleased]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/ca21900...v0.2.0

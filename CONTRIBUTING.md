@@ -23,7 +23,12 @@ The test suite must stay green before a PR is merged.
 - [`src/secops_toolkit_mcp/server.py`](src/secops_toolkit_mcp/server.py) — a
   thin [FastMCP](https://github.com/jlowin/fastmcp) wrapper that exposes each
   `core.py` function as an MCP tool. It should not contain logic of its own.
+- [`src/secops_toolkit_mcp/cli.py`](src/secops_toolkit_mcp/cli.py) — the
+  standalone `secops-scan-repo` console script. Only `scan_repo_root` is
+  wired up here today; a tool needs a standalone CLI use case (a pre-clone
+  hook, a CI step) to justify one, not every tool needs one by default.
 - [`tests/test_core.py`](tests/test_core.py) — unit tests for `core.py`.
+- [`tests/test_cli.py`](tests/test_cli.py) — unit tests for `cli.py`.
 
 ## Adding a tool
 
