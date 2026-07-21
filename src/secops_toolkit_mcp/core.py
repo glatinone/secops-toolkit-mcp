@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import math
+import os
 import re
 import shlex
 from pathlib import Path
@@ -245,15 +246,45 @@ _MEDIUM_SHADOW_NAMES = {
 # .wsf) are a different risk shape and out of scope here.
 _WINDOWS_EXECUTABLE_EXTENSIONS = {".exe", ".cmd", ".bat", ".com"}
 
+# Wiz's "GhostApproval" (Amazon Q, Cursor) and Cursor's "DuneSlide"
+# (CVE-2026-50548/50549) disclosures are a second, structurally distinct
+# masquerading shape: an approval dialog or sandbox check displays a decoy
+# path while a symlink silently redirects the actual write target outside
+# the trusted directory -- up to and including `~/.ssh/authorized_keys`.
+# Unlike the shadowed-name check above, this isn't a Windows CWD-search-order
+# problem specific to the root -- a planted symlink can sit anywhere in the
+# tree a tool later writes through it -- so this walks the whole repo rather
+# than just the top level. `followlinks=False` on the walk itself so a
+# symlinked directory's contents are never traversed; only the symlink entry
+# itself is inspected.
+
+# Path segments/filenames that make an out-of-root symlink target especially
+# dangerous to write through. Illustrative, not exhaustive -- same posture as
+# the shadow-name lists above.
+_SENSITIVE_TARGET_DIR_NAMES = {".ssh", ".aws", ".gnupg", ".docker", ".kube", ".azure"}
+_SENSITIVE_TARGET_FILE_NAMES = {
+    "authorized_keys", "id_rsa", "id_ecdsa", "id_ed25519", "id_dsa",
+    "credentials", ".netrc", ".npmrc", ".git-credentials", ".pgpass", ".pypirc",
+}
+
+
+def _is_sensitive_symlink_target(resolved: Path) -> bool:
+    parts_lower = {part.lower() for part in resolved.parts}
+    if parts_lower & _SENSITIVE_TARGET_DIR_NAMES:
+        return True
+    return resolved.name.lower() in _SENSITIVE_TARGET_FILE_NAMES
+
 
 def scan_repo_root(path: str) -> dict[str, object]:
-    """Scan a directory's top-level entries for filenames that shadow common
-    developer-tool command names.
+    """Scan a directory for filenames that shadow common developer-tool
+    command names, and for symlinks that resolve outside the directory.
 
     Run this before opening a freshly cloned or downloaded repository in an
-    agentic coding tool. Only the top level is checked (not recursively) —
-    that matches Windows's actual unqualified-command search order, which
-    looks at the current working directory, not subdirectories.
+    agentic coding tool. The shadowed-name check only looks at the top level
+    (matching Windows's actual unqualified-command search order, which checks
+    the current working directory, not subdirectories); the symlink-escape
+    check walks the whole tree, since a planted symlink can sit anywhere a
+    tool later writes through it.
 
     Raises ``ValueError`` if ``path`` does not exist or is not a directory.
     """
@@ -263,7 +294,7 @@ def scan_repo_root(path: str) -> dict[str, object]:
     if not directory.is_dir():
         raise ValueError(f"not a directory: {path}")
 
-    findings: list[dict[str, str]] = []
+    findings: list[dict[str, object]] = []
     entries_scanned = 0
     for entry in sorted(directory.iterdir(), key=lambda p: p.name.lower()):
         if not entry.is_file():
@@ -284,11 +315,45 @@ def scan_repo_root(path: str) -> dict[str, object]:
         else:
             continue
 
-        findings.append({"filename": entry.name, "shadows": stem, "severity": severity})
+        findings.append({
+            "kind": "shadowed_name",
+            "filename": entry.name,
+            "shadows": stem,
+            "severity": severity,
+        })
+
+    root_resolved = directory.resolve()
+    symlinks_scanned = 0
+    for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
+        for name in dirnames + filenames:
+            candidate = Path(dirpath) / name
+            if not candidate.is_symlink():
+                continue
+            symlinks_scanned += 1
+
+            try:
+                resolved = candidate.resolve(strict=False)
+            except OSError:
+                # Unresolvable (e.g. a symlink loop) -- not the write-target
+                # escape this check targets, so skip rather than guess.
+                continue
+
+            if resolved.is_relative_to(root_resolved):
+                continue
+
+            relative_path = candidate.relative_to(directory).as_posix()
+            severity = "critical" if _is_sensitive_symlink_target(resolved) else "high"
+            findings.append({
+                "kind": "symlink_escape",
+                "path": relative_path,
+                "resolves_to": str(resolved),
+                "severity": severity,
+            })
 
     return {
         "path": str(directory),
         "entries_scanned": entries_scanned,
+        "symlinks_scanned": symlinks_scanned,
         "clean": not findings,
         "findings": findings,
     }

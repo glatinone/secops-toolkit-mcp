@@ -1,5 +1,7 @@
 """Unit tests for the pure helpers in secops_toolkit_mcp.core."""
 
+import os
+
 import pytest
 
 from secops_toolkit_mcp import core
@@ -158,7 +160,12 @@ def test_scan_repo_root_flags_git_exe_as_critical(tmp_path):
     result = core.scan_repo_root(str(tmp_path))
     assert result["clean"] is False
     assert result["findings"] == [
-        {"filename": "git.exe", "shadows": "git", "severity": "critical"}
+        {
+            "kind": "shadowed_name",
+            "filename": "git.exe",
+            "shadows": "git",
+            "severity": "critical",
+        }
     ]
 
 
@@ -197,6 +204,97 @@ def test_scan_repo_root_only_checks_top_level(tmp_path):
     result = core.scan_repo_root(str(tmp_path))
     assert result["clean"] is True
     assert result["entries_scanned"] == 0
+
+
+def _symlink_or_skip(target, link_path, target_is_directory=False):
+    """Create a symlink, or skip the test if this platform/user can't.
+
+    Windows requires either Developer Mode or an elevated process to create
+    symlinks without hitting WinError 1314; CI (ubuntu-latest) has no such
+    restriction, so this only skips in constrained local/Windows setups.
+    """
+    try:
+        os.symlink(target, link_path, target_is_directory=target_is_directory)
+    except OSError as exc:
+        pytest.skip(f"cannot create symlinks in this environment: {exc}")
+
+
+def test_scan_repo_root_flags_symlink_resolving_outside_root(tmp_path, tmp_path_factory):
+    repo = tmp_path
+    outside = tmp_path_factory.mktemp("outside")
+    (outside / "payload.txt").write_text("x")
+    _symlink_or_skip(outside, repo / "vendor_link", target_is_directory=True)
+
+    result = core.scan_repo_root(str(repo))
+    assert result["clean"] is False
+    assert result["symlinks_scanned"] == 1
+    assert result["findings"] == [
+        {
+            "kind": "symlink_escape",
+            "path": "vendor_link",
+            "resolves_to": str(outside.resolve()),
+            "severity": "high",
+        }
+    ]
+
+
+def test_scan_repo_root_flags_symlink_to_ssh_dir_as_critical(tmp_path, tmp_path_factory):
+    repo = tmp_path
+    fake_home = tmp_path_factory.mktemp("fake_home")
+    ssh_dir = fake_home / ".ssh"
+    ssh_dir.mkdir()
+    _symlink_or_skip(ssh_dir, repo / "config_link", target_is_directory=True)
+
+    result = core.scan_repo_root(str(repo))
+    assert result["findings"][0]["severity"] == "critical"
+
+
+def test_scan_repo_root_flags_symlink_to_authorized_keys_as_critical(tmp_path, tmp_path_factory):
+    repo = tmp_path
+    outside = tmp_path_factory.mktemp("outside_home")
+    target_file = outside / "authorized_keys"
+    target_file.write_text("ssh-ed25519 AAAA...")
+    _symlink_or_skip(target_file, repo / "notes.txt")
+
+    result = core.scan_repo_root(str(repo))
+    assert result["findings"][0]["severity"] == "critical"
+
+
+def test_scan_repo_root_ignores_symlink_resolving_inside_root(tmp_path):
+    repo = tmp_path
+    real_dir = repo / "real"
+    real_dir.mkdir()
+    _symlink_or_skip(real_dir, repo / "alias", target_is_directory=True)
+
+    result = core.scan_repo_root(str(repo))
+    assert result["clean"] is True
+    assert result["symlinks_scanned"] == 1
+
+
+def test_scan_repo_root_finds_symlink_nested_in_subdirectory(tmp_path, tmp_path_factory):
+    repo = tmp_path
+    nested = repo / "src" / "lib"
+    nested.mkdir(parents=True)
+    outside = tmp_path_factory.mktemp("outside_nested")
+    _symlink_or_skip(outside, nested / "escape_link", target_is_directory=True)
+
+    result = core.scan_repo_root(str(repo))
+    assert result["clean"] is False
+    assert result["findings"][0]["path"] == "src/lib/escape_link"
+
+
+def test_scan_repo_root_does_not_recurse_into_symlinked_directory_contents(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside_contents")
+    (outside / "git.exe").write_bytes(b"MZ")
+    repo = tmp_path
+    _symlink_or_skip(outside, repo / "vendor_link", target_is_directory=True)
+
+    result = core.scan_repo_root(str(repo))
+    # The symlink itself is flagged as an escape; its contents (a shadowed
+    # name that would otherwise be a top-level match inside `outside`) must
+    # never be walked into.
+    kinds = {f["kind"] for f in result["findings"]}
+    assert kinds == {"symlink_escape"}
 
 
 def test_scan_repo_root_rejects_missing_path(tmp_path):

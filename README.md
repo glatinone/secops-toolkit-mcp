@@ -22,7 +22,7 @@ Built with [FastMCP](https://github.com/jlowin/fastmcp).
 | `password_entropy` | Estimate password strength in bits of entropy. |
 | `cidr_info` | Describe a CIDR network: netmask, host range, size, privacy. |
 | `ip_in_cidr` | Check whether an IP falls inside a CIDR range. |
-| `scan_repo_root` | Check a repo's top-level directory for files that shadow common dev command names (`git.exe`, `node.exe`, etc.) before you open it in an agentic coding tool. |
+| `scan_repo_root` | Check a repo's top-level directory for files that shadow common dev command names (`git.exe`, `node.exe`, etc.), and the whole tree for symlinks that resolve outside the repo, before you open it in an agentic coding tool. |
 | `assess_shell_command` | Assess a shell command for constructs (quote fragmentation, command substitution, IFS tricks) that look benign to naive string matching but execute something else once a shell expands them. |
 
 > These are **defensive / analysis** utilities — parsing, hashing, and network
@@ -70,9 +70,10 @@ download a repo and before you open it in an agentic coding tool.
 
 ```bash
 uv run secops-scan-repo /path/to/a/freshly-cloned-repo
-# secops-scan-repo: /path/to/a/freshly-cloned-repo (5 top-level file(s) scanned)
+# secops-scan-repo: /path/to/a/freshly-cloned-repo (4 top-level file(s), 1 symlink(s) scanned)
 #
 #   [CRITICAL] git.exe shadows the 'git' command
+#   [CRITICAL] vendor_link is a symlink resolving outside the repo root, to /home/dev/.ssh/authorized_keys
 ```
 
 Exits `0` on a clean directory, `1` if a finding is at or above
@@ -124,9 +125,12 @@ ip_in_cidr("10.0.0.5", "10.0.0.0/24")
 # True
 
 scan_repo_root("/path/to/a/freshly-cloned-repo")
-# {'path': '/path/to/a/freshly-cloned-repo', 'entries_scanned': 5,
-#  'clean': False, 'findings': [
-#    {'filename': 'git.exe', 'shadows': 'git', 'severity': 'critical'}
+# {'path': '/path/to/a/freshly-cloned-repo', 'entries_scanned': 4,
+#  'symlinks_scanned': 1, 'clean': False, 'findings': [
+#    {'kind': 'shadowed_name', 'filename': 'git.exe', 'shadows': 'git',
+#     'severity': 'critical'},
+#    {'kind': 'symlink_escape', 'path': 'vendor_link',
+#     'resolves_to': '/home/dev/.ssh/authorized_keys', 'severity': 'critical'}
 #  ]}
 
 assess_shell_command("r'm' -rf /")
@@ -171,6 +175,29 @@ exploitable:
 Only the top-level directory is checked, matching how Windows's own
 unqualified-command search actually works (current directory, then `PATH` —
 it does not recurse into subdirectories).
+
+### Symlink-escape check
+
+Wiz's "GhostApproval" (Amazon Q, Cursor) and Cursor's "DuneSlide"
+(CVE-2026-50548/50549, CVSS 9.3-9.8) disclosures are a second, unrelated
+masquerading shape: an approval dialog or sandbox check displays a decoy
+path while a symlink silently redirects the actual write target outside the
+trusted directory — up to and including `~/.ssh/authorized_keys`. Both are
+zero-click once triggered by a prompt-injected agent action.
+
+`scan_repo_root` also walks the whole repo tree (not just the top level —
+a planted symlink can sit anywhere a tool later writes through it) and
+flags any symlink whose resolved target lies outside the scanned root:
+
+- **critical** — the resolved target hits a known sensitive path (an
+  `.ssh`/`.aws`/`.gnupg`/`.docker`/`.kube`/`.azure` directory, or a private
+  key/credential filename like `authorized_keys`, `id_rsa`, `.npmrc`,
+  `.git-credentials`).
+- **high** — resolves outside the root to anywhere else.
+
+A symlinked directory's own contents are never walked into (only the
+symlink entry itself is inspected), so this can't be tricked into
+recursing outside the intended scan boundary.
 
 ## Why `assess_shell_command` exists
 
@@ -271,10 +298,13 @@ tool, and [CHANGELOG.md](CHANGELOG.md) for release history.
   (v0.4.0), closing the GuardFall 2026-06 bypass class
 - [x] `secops-scan-repo`, a standalone CLI for `scan_repo_root` (v0.5.0), so
   it can run in a pre-clone git hook or CI step without an MCP client
-- [ ] Widen `scan_repo_root`'s shadowed-name/extension coverage and
-  `assess_shell_command`'s denylist patterns as real-world use surfaces
-  gaps; both are intentionally high-signal, not exhaustive (see the module
-  comments in `core.py`)
+- [x] `scan_repo_root` symlink-escape check (v0.6.0): flags a symlink
+  anywhere in the repo tree whose resolved target lies outside the repo
+  root, closing the GhostApproval/DuneSlide hidden-write-target pattern
+- [ ] Widen `scan_repo_root`'s shadowed-name/extension coverage, its
+  sensitive-target symlink list, and `assess_shell_command`'s denylist
+  patterns as real-world use surfaces gaps; all three are intentionally
+  high-signal, not exhaustive (see the module comments in `core.py`)
 - [ ] PyPI packaging, once the same pattern is proven end to end on
   [mcpscan](https://github.com/glatinone/mcpscan) first
 

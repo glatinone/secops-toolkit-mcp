@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-21
+
+### Added
+
+- `scan_repo_root`: now also walks the whole repo tree (not just the top
+  level) for symlinks whose resolved target lies outside the scanned root,
+  closing the "hidden write-target" pattern behind Wiz's "GhostApproval"
+  (Amazon Q, Cursor) and Cursor's "DuneSlide" (CVE-2026-50548/50549, CVSS
+  9.3-9.8) disclosures — both show an approval dialog or sandbox check
+  trusting a decoy path while a symlink silently redirects the real write
+  target, up to and including `~/.ssh/authorized_keys`. Critical severity
+  when the resolved target hits a known sensitive path (`.ssh`/`.aws`/
+  `.gnupg`/`.docker`/`.kube`/`.azure`, or a private key/credential filename);
+  high otherwise. `followlinks=False` on the walk itself, so a symlinked
+  directory's own contents are never traversed — only the symlink entry
+  itself is inspected. New `symlinks_scanned` field on the result. 6 new
+  tests (61 total, was 55).
+
+### Changed
+
+- `scan_repo_root` findings now carry a `kind` field (`shadowed_name` or
+  `symlink_escape`) to distinguish the two independent checks in the same
+  `findings` list. The CLI's text renderer and the MCP tool docstring were
+  updated to describe and render both.
+
 ## [0.5.0] - 2026-07-21
 
 ### Added
@@ -109,7 +134,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `password_entropy`, `cidr_info`, `ip_in_cidr` tools over FastMCP. Never tagged
   on GitHub — `0.2.0` is this project's first tagged release.
 
-[Unreleased]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.2.0...v0.3.0

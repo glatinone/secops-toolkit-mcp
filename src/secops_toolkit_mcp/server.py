@@ -76,7 +76,8 @@ def ip_in_cidr(ip: str, cidr: str) -> bool:
 @mcp.tool
 def scan_repo_root(path: str) -> dict[str, object]:
     """Check a repo's top-level directory for files that shadow common
-    developer command names (``git.exe``, ``node.exe``, ``npm.cmd``, etc.).
+    developer command names (``git.exe``, ``node.exe``, ``npm.cmd``, etc.),
+    and the whole tree for symlinks that resolve outside the directory.
 
     Run this before opening a freshly cloned or downloaded repository in an
     agentic coding tool. On Windows, several tools (Cursor, GitHub Copilot
@@ -85,7 +86,16 @@ def scan_repo_root(path: str) -> dict[str, object]:
     ``git.exe`` at the root runs instead of the real one, before any
     workspace-trust prompt appears. Severity: critical for ``git`` (the
     confirmed vector), high for shells/interpreters, medium for other common
-    dev tools. Only the top-level directory is checked, not subdirectories.
+    dev tools. Only the top-level directory is checked for this, not
+    subdirectories.
+
+    Separately, a symlink anywhere in the tree whose resolved target lies
+    outside this directory is flagged too (the GhostApproval/DuneSlide
+    hidden-write-target pattern: an approval dialog shows a decoy path while
+    the symlink redirects the real write elsewhere, e.g.
+    ``~/.ssh/authorized_keys``). Critical if the resolved target hits a known
+    sensitive path (SSH/cloud-credential directories, private key files),
+    high otherwise.
     """
     return core.scan_repo_root(path)
 

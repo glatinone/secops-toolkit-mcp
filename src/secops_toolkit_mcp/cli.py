@@ -31,7 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Check a directory's top-level entries for filenames that shadow "
             "common developer command names (git.exe, node.exe, npm.cmd, "
-            "etc.) before you clone-and-open it in an agentic coding tool."
+            "etc.), and the whole tree for symlinks that resolve outside the "
+            "directory, before you clone-and-open it in an agentic coding tool."
         ),
     )
     p.add_argument("path", nargs="?", default=".", help="directory to scan (default: .)")
@@ -45,22 +46,38 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _scanned_summary(result: dict[str, object]) -> str:
+    return (
+        f"{result['entries_scanned']} top-level file(s), "
+        f"{result['symlinks_scanned']} symlink(s) scanned"
+    )
+
+
+def _render_finding(finding: dict[str, object]) -> str:
+    severity = finding["severity"].upper()  # type: ignore[union-attr]
+    if finding["kind"] == "symlink_escape":
+        return (
+            f"  [{severity}] {finding['path']} is a symlink resolving "
+            f"outside the repo root, to {finding['resolves_to']}"
+        )
+    return (
+        f"  [{severity}] {finding['filename']} shadows the "
+        f"'{finding['shadows']}' command"
+    )
+
+
 def _render_text(result: dict[str, object]) -> str:
     if result["clean"]:
         return (
             f"secops-scan-repo: {result['path']} is clean "
-            f"({result['entries_scanned']} top-level file(s) scanned)."
+            f"({_scanned_summary(result)})."
         )
     lines = [
-        f"secops-scan-repo: {result['path']} "
-        f"({result['entries_scanned']} top-level file(s) scanned)",
+        f"secops-scan-repo: {result['path']} ({_scanned_summary(result)})",
         "",
     ]
     for finding in result["findings"]:  # type: ignore[union-attr]
-        lines.append(
-            f"  [{finding['severity'].upper()}] {finding['filename']} "
-            f"shadows the '{finding['shadows']}' command"
-        )
+        lines.append(_render_finding(finding))
     return "\n".join(lines)
 
 
