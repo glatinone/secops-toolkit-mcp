@@ -23,7 +23,7 @@ Built with [FastMCP](https://github.com/jlowin/fastmcp).
 | `cidr_info` | Describe a CIDR network: netmask, host range, size, privacy. |
 | `ip_in_cidr` | Check whether an IP falls inside a CIDR range. |
 | `scan_repo_root` | Check a repo's top-level directory for files that shadow common dev command names (`git.exe`, `node.exe`, etc.), and the whole tree for symlinks that resolve outside the repo, before you open it in an agentic coding tool. |
-| `assess_shell_command` | Assess a shell command for constructs (quote fragmentation, command substitution, IFS tricks) that look benign to naive string matching but execute something else once a shell expands them. |
+| `assess_shell_command` | Assess a shell command for constructs (quote fragmentation, command substitution, IFS tricks, encoded pipelines, setuid grants) that look benign to naive string matching but execute something else once a shell expands them. |
 
 > These are **defensive / analysis** utilities — parsing, hashing, and network
 > math. They don't scan, attack, or reach out to any host.
@@ -144,6 +144,23 @@ assess_shell_command("r'm' -rf /")
 # Note raw_denylist_hits is empty: a filter matching the raw text "r'm' -rf /"
 # finds nothing. normalized_denylist_hits catches it because the tokens are
 # what a real shell would actually run.
+
+assess_shell_command("echo cm0gLXJmIC8= | base64 -d | sh")
+# {'command': 'echo cm0gLXJmIC8= | base64 -d | sh', 'risk': 'dangerous',
+#  'logical_commands': [
+#    {'raw_segment': 'echo cm0gLXJmIC8=', 'tokens': ['echo', 'cm0gLXJmIC8='],
+#     'effective_command': 'echo cm0gLXJmIC8=', 'findings': [], 'risk': 'safe', ...},
+#    {'raw_segment': 'base64 -d', 'tokens': ['base64', '-d'],
+#     'effective_command': 'base64 -d',
+#     'findings': ['pipe_decoded_content_to_interpreter'], 'risk': 'dangerous', ...},
+#    {'raw_segment': 'sh', 'tokens': ['sh'], 'effective_command': 'sh',
+#     'findings': ['pipe_decoded_content_to_interpreter'], 'risk': 'dangerous', ...}
+#  ],
+#  'pipe_findings': [{'type': 'pipe_decoded_content_to_interpreter',
+#                      'segments': ['base64 -d', 'sh']}], ...}
+# The base64 blob decodes to "rm -rf /" -- decoding it is what turns opaque
+# text into an executable payload, the same "danger only visible after a
+# transform the filter doesn't model" shape as piping a fetch into a shell.
 ```
 
 From an MCP client, the same calls happen through natural language, for
@@ -222,13 +239,38 @@ command is what gets checked, not the raw string. It also:
 - Flags unquoted variable expansion, `$IFS`-based space-substitution tricks,
   ANSI-C (`$'...'`) quoting, and unbalanced quotes — constructs whose real
   effect can't be determined from the text alone.
-- Flags a fetch piped straight into an interpreter (`curl ... | sh`), a
-  pattern that gives you no chance to inspect what you're about to run.
+- Flags a fetch piped straight into an interpreter (`curl ... | sh`), or an
+  encoded payload decoded and piped straight into one (`base64 -d | sh`,
+  `xxd -r | sh`) — patterns that give you no chance to inspect what you're
+  about to run.
+- Flags setuid grants (`chmod +s`, `chmod 4755`, `install -m 4755`) and
+  overwriting a credential file in place (`sed -i`/`tee` targeting
+  `~/.aws/credentials`, `~/.ssh/authorized_keys`, and similar).
 
 It never executes the command, or any part of it, at any point — this is
 static text analysis, not a sandbox. Returns `risk` (`safe`, `suspicious`, or
 `dangerous`) plus `bypassed_raw_pattern_match`: concrete, per-call evidence
 that a normalized check caught something a raw-text filter would have missed.
+
+### Validated against GuardFall's disclosed bypass corpus
+
+The bypass classes above aren't a guess at what GuardFall's disclosure might
+cover — they were checked directly against GuardFall's own published
+write-ups (not a summary of them). Confirmed already caught: quote
+fragmentation/merge (`r''m`, `r'm' -rf /`), `$IFS`-as-space substitution,
+command substitution used as an argument, backtick substitution, ANSI-C
+quoting. Two real gaps found and closed in this pass: the encoded-pipeline
+class (`echo <base64> | base64 -d | sh`) and several "alternative destructive
+utility" shapes the denylist didn't cover (setuid grants, in-place credential
+file overwrites, and `$HOME`/`~`-relative sensitive paths like
+`rm -rf "$HOME/.aws/credentials"`, GuardFall's own cited real-world example).
+
+One limitation is deliberate, not missed: a command substitution that
+computes the *command name itself* (`$(echo rm) -rf /`) can only be flagged
+`suspicious`, not `dangerous`, without actually running the substitution to
+see what it produces — and running untrusted code to decide whether it's
+safe to run defeats the point. See `tests/test_core.py`'s "GuardFall
+disclosed corpus" section for the full payload-by-payload results.
 
 ## Run with Docker
 
@@ -301,6 +343,11 @@ tool, and [CHANGELOG.md](CHANGELOG.md) for release history.
 - [x] `scan_repo_root` symlink-escape check (v0.6.0): flags a symlink
   anywhere in the repo tree whose resolved target lies outside the repo
   root, closing the GhostApproval/DuneSlide hidden-write-target pattern
+- [x] `assess_shell_command` validated directly against GuardFall's disclosed
+  bypass corpus (v0.7.0), not just a research digest of it — closed two real
+  gaps found this way: encoded pipelines (`base64 -d | sh`, `xxd -r | sh`)
+  and alternative destructive-utility shapes (setuid grants, in-place
+  credential-file overwrites, `$HOME`/`~`-relative sensitive rm targets)
 - [ ] Widen `scan_repo_root`'s shadowed-name/extension coverage, its
   sensitive-target symlink list, and `assess_shell_command`'s denylist
   patterns as real-world use surfaces gaps; all three are intentionally

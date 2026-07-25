@@ -116,8 +116,11 @@ def assess_shell_command(command: str) -> dict[str, object]:
     backslash-obfuscated commands (``r'm' -rf /``) normalize to what actually
     runs (``rm -rf /``) before any check. Flags command substitution
     (``$(...)``, backticks, recursively assessed), unquoted variable
-    expansion, IFS manipulation, ANSI-C quoting, and a fetch-piped-to-
-    interpreter shape (``curl ... | sh``). Returns ``risk`` (``safe``,
+    expansion, IFS manipulation, ANSI-C quoting, a fetch or encoded-payload
+    decode piped straight into an interpreter (``curl ... | sh``,
+    ``base64 -d | sh``), setuid grants (``chmod +s``, ``install -m 4755``),
+    and in-place credential-file overwrites (``sed -i``/``tee`` targeting
+    ``~/.aws/credentials`` and similar). Returns ``risk`` (``safe``,
     ``suspicious``, or ``dangerous``), per-segment findings, and
     ``bypassed_raw_pattern_match`` -- concrete evidence a normalized segment
     caught something the raw text alone would have missed.

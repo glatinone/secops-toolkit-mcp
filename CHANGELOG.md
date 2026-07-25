@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-25
+
+### Added
+
+- `assess_shell_command`: validated directly against GuardFall's actual
+  disclosed bypass corpus (Adversa AI's and The Hacker News's write-ups, read
+  directly rather than assumed from a research digest of them). Confirmed
+  already caught: quote fragmentation/merge, `$IFS`-as-space substitution,
+  command substitution as an argument, backtick substitution, ANSI-C
+  quoting. Closed two real gaps found this way:
+  - **Encoded pipelines**: a decoded payload piped straight into an
+    interpreter (`echo <base64> | base64 -d | sh`, `... | xxd -r | sh`) is
+    now flagged the same way a fetch-piped-to-interpreter already was, as
+    `pipe_decoded_content_to_interpreter`.
+  - **Alternative destructive utilities**: setuid grants (`chmod +s`,
+    `chmod 4755`, `install -m 4755`), in-place credential-file overwrites
+    (`sed -i`/`tee` targeting `~/.aws/credentials`, `~/.ssh/authorized_keys`,
+    and other names already used by `scan_repo_root`'s symlink-target list),
+    and `$HOME`/`~`-relative sensitive `rm -rf` targets (previously only a
+    bare `$HOME`/`~` with nothing after it was recognized —
+    `rm -rf "$HOME/.aws/credentials"`, GuardFall's own cited real-world
+    exploitation example, is now caught too).
+  - Deliberately **not** closed: a command substitution that computes the
+    command name itself (`$(echo rm) -rf /`) stays `suspicious`, not
+    `dangerous` — resolving it would mean running the substitution to see
+    what it produces, defeating the "never execute anything" design. See
+    the module comment above `assess_shell_command` in `core.py` and the
+    "GuardFall disclosed corpus" tests in `test_core.py`.
+  - 18 new tests, all passing (73 passing total, was 55; 6 pre-existing
+    symlink tests still skip on this platform without symlink privilege).
+
 ## [0.6.0] - 2026-07-21
 
 ### Added

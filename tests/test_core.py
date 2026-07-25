@@ -439,3 +439,159 @@ def test_assess_shell_command_splits_on_semicolon_and_logical_operators():
     assert len(result["logical_commands"]) == 2
     assert result["risk"] == "dangerous"
     assert result["logical_commands"][1]["effective_command"] == "rm -rf /"
+
+
+# --- GuardFall disclosed corpus ---------------------------------------------
+#
+# 2026-07-25 validation pass: these payloads are taken directly from
+# GuardFall's own disclosure write-ups (Adversa AI, The Hacker News), not
+# reconstructed from the research digest that pointed at them. Each test
+# names the disclosed class it corresponds to so a reader can check this
+# suite against the source material directly.
+
+
+def test_guardfall_corpus_empty_quote_merge():
+    # Class A: "a filter watching for rm sees nothing wrong with r''m,
+    # because to a text matcher those are different strings. Bash removes
+    # the empty quotes and runs rm anyway." (The Hacker News)
+    result = core.assess_shell_command("r''m -rf /")
+    assert result["risk"] == "dangerous"
+    assert result["logical_commands"][0]["effective_command"] == "rm -rf /"
+    assert result["bypassed_raw_pattern_match"] is True
+
+
+def test_guardfall_corpus_quoted_argument_variant():
+    # Class A variant: each argument individually quoted.
+    result = core.assess_shell_command('"rm" "-rf" "/etc"')
+    assert result["risk"] == "dangerous"
+    assert result["logical_commands"][0]["effective_command"] == "rm -rf /etc"
+
+
+def test_guardfall_corpus_ifs_expansion_three_arguments():
+    # Class B: "rm$IFS-rf$IFS/" expands to three arguments (rm, -rf, /).
+    result = core.assess_shell_command("rm$IFS-rf$IFS/")
+    assert result["risk"] == "dangerous"
+
+
+def test_guardfall_corpus_command_substitution_side_effect_without_force_flags():
+    # Class C variant: "echo \"$(rm /etc/x)\"" -- `rm` deletes a single file
+    # fine without needing "force" flags, but this function's rm check
+    # specifically requires the recurse+force combination (the existing,
+    # already-documented scope, see
+    # test_assess_shell_command_does_not_flag_rm_without_force_flag above).
+    # Stays "suspicious" via the substitution alone, not "dangerous". Not
+    # treated as a gap to close here: widening to "any single-file rm under
+    # a system path" needs its own false-positive analysis (legitimate
+    # scripts do delete individual files under /etc/myapp/, /var/cache/,
+    # etc.) and isn't one of this pass's confirmed, high-confidence closes.
+    result = core.assess_shell_command('echo "$(rm /etc/x)"')
+    assert result["risk"] == "suspicious"
+
+
+def test_guardfall_corpus_real_organization_example_rm_credentials_via_home():
+    # GuardFall's own cited real-world exploitation, from a Makefile `clean`
+    # target: `rm -rf "$$HOME/.aws/credentials"` (the doubled `$$` is Make's
+    # own escaping for a literal `$`; the shell sees a single `$HOME`). The
+    # confirmed gap this run closes: the sensitive-target check previously
+    # only matched a bare `$HOME`/`~` with nothing after it, so
+    # `$HOME/.aws/credentials` was invisible to it despite `-rf` being
+    # present -- now resolved via the same sensitive dir/file name lists
+    # scan_repo_root's symlink check already uses.
+    result = core.assess_shell_command('rm -rf "$HOME/.aws/credentials"')
+    assert result["risk"] == "dangerous"
+
+
+def test_guardfall_corpus_home_relative_cache_cleanup_is_not_flagged():
+    # Deliberately not widened to "any -rf under $HOME/~" -- that would flag
+    # common, benign cleanup that has nothing to do with this disclosure.
+    result = core.assess_shell_command("rm -rf ~/some-cache-dir")
+    assert result["risk"] == "safe"
+
+
+def test_guardfall_corpus_command_substitution_as_command_name_is_a_known_limit():
+    # Class C: "$(echo rm) -rf /" -- the substitution computes the *binary
+    # name* that then runs. This function does not execute `echo rm` to learn
+    # it evaluates to "rm", since doing so would mean running untrusted code
+    # to decide whether it is safe to run -- the same reason a bare
+    # substitution like `X=$(whoami); echo $X` is only ever "suspicious", not
+    # "dangerous". Documented here as a deliberate, honest limit rather than
+    # a silently-missed case: any command substitution already raises risk to
+    # at least "suspicious", which is what happens here too.
+    result = core.assess_shell_command("$(echo rm) -rf /")
+    assert result["risk"] == "suspicious"
+    assert len(result["substitutions"]) == 1
+
+
+def test_guardfall_corpus_base64_decode_piped_to_interpreter():
+    # Class D: "a command hidden in base64 and piped into a shell." The
+    # confirmed gap this run closes -- previously only curl/wget piped to an
+    # interpreter was flagged, not an encode/decode utility standing in for
+    # the network fetch.
+    result = core.assess_shell_command("echo cm0gLXJmIC8= | base64 -d | sh")
+    assert result["risk"] == "dangerous"
+    assert result["pipe_findings"][0]["type"] == "pipe_decoded_content_to_interpreter"
+
+
+def test_guardfall_corpus_base64_long_flag_and_bash():
+    result = core.assess_shell_command("cat payload.b64 | base64 --decode | bash")
+    assert result["risk"] == "dangerous"
+    assert result["pipe_findings"][0]["type"] == "pipe_decoded_content_to_interpreter"
+
+
+def test_guardfall_corpus_xxd_reverse_piped_to_interpreter():
+    result = core.assess_shell_command("cat payload.hex | xxd -r | sh")
+    assert result["risk"] == "dangerous"
+    assert result["pipe_findings"][0]["type"] == "pipe_decoded_content_to_interpreter"
+
+
+def test_guardfall_corpus_bare_base64_encode_is_not_flagged():
+    # base64 with no decode flag only *encodes* -- not the dangerous
+    # direction, and should not be flagged just for appearing before a shell.
+    result = core.assess_shell_command("tar -cf - . | base64 | sh")
+    assert result["pipe_findings"] == []
+
+
+def test_guardfall_corpus_setuid_grant_via_chmod_symbolic():
+    # Class E: setuid backdoor persistence via `chmod +s`.
+    result = core.assess_shell_command("chmod +s /tmp/backdoor")
+    assert result["risk"] == "dangerous"
+
+
+def test_guardfall_corpus_setuid_grant_via_chmod_numeric():
+    result = core.assess_shell_command("chmod 4755 /tmp/backdoor")
+    assert result["risk"] == "dangerous"
+
+
+def test_guardfall_corpus_setgid_directory_is_not_flagged():
+    # `chmod 2775` on a shared directory is a common, benign sysadmin
+    # pattern -- deliberately not treated the same as a setuid file grant.
+    result = core.assess_shell_command("chmod 2775 /srv/shared")
+    assert result["risk"] == "safe"
+
+
+def test_guardfall_corpus_setuid_install():
+    # Class E: "install -m 4755 payload /usr/local/bin/backdoor".
+    result = core.assess_shell_command("install -m 4755 payload /usr/local/bin/backdoor")
+    assert result["risk"] == "dangerous"
+
+
+def test_guardfall_corpus_credential_file_overwrite_via_sed():
+    # GuardFall's own "real organization" example: overwriting a credential
+    # file in place is just as effective as deleting it, and easier to miss.
+    result = core.assess_shell_command(
+        "sed -i 's/key=.*/key=attacker/' ~/.aws/credentials"
+    )
+    assert result["risk"] == "dangerous"
+
+
+def test_guardfall_corpus_credential_file_overwrite_via_tee():
+    result = core.assess_shell_command("echo attacker_key | tee ~/.ssh/authorized_keys")
+    assert result["risk"] == "dangerous"
+
+
+def test_guardfall_corpus_alternative_disk_write_utility_still_covered():
+    # Class E: dd targeting a raw disk device was already covered before
+    # this validation pass; confirming it still holds alongside the new
+    # checks.
+    result = core.assess_shell_command("dd if=payload of=/dev/sda")
+    assert result["risk"] == "dangerous"

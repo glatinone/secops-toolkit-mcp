@@ -389,6 +389,28 @@ def ip_in_cidr(ip: str, cidr: str) -> bool:
 # manipulation, ANSI-C quoting) whose real effect cannot be determined by
 # string inspection alone. No shell is ever invoked; everything here is pure
 # text analysis.
+#
+# 2026-07-25 validation pass: read GuardFall's actual disclosed bypass corpus
+# (Adversa AI's and The Hacker News's write-ups, not just a research digest of
+# them) and ran it against this function directly rather than assuming
+# category-name overlap meant real coverage. Confirmed already caught: quote-
+# fragmentation/merge (`r''m`, `r'm' -rf /`), `$IFS`-as-space substitution,
+# command substitution used as an *argument* (`echo $(rm -rf /)`), backtick
+# substitution, ANSI-C quoting. Found and closed two real gaps: an encoded
+# pipeline (`echo <base64> | base64 -d | sh`) and several "alternative
+# destructive utility" shapes the denylist didn't cover (setuid grants via
+# `chmod +s`/`chmod 4755`/`install -m 4755`, and overwriting a credential file
+# in place via `sed -i`/`tee` rather than deleting it). See
+# `tests/test_core.py`'s "GuardFall disclosed corpus" section for the exact
+# payloads and one confirmed, deliberately-not-closed limitation: a
+# substitution that computes the *command name itself*
+# (`$(echo rm) -rf /`) can only be flagged as `suspicious`, not `dangerous`,
+# without actually running the substitution to see what it produces --
+# indistinguishable, from pure text, from a substitution that produces
+# something harmless (`$(echo hello) -rf /` is nonsense but not dangerous).
+# That would mean executing untrusted code to decide if it's safe to execute,
+# defeating the point; the existing suspicious-not-dangerous treatment of any
+# substitution is the correct, honest answer here, not a gap to fix.
 
 _RISK_ORDER = {"safe": 0, "suspicious": 1, "dangerous": 2}
 
@@ -397,9 +419,19 @@ def _max_risk(*risks: str) -> str:
     return max(risks, key=lambda r: _RISK_ORDER[r])
 
 
+# Reuses the same filename list scan_repo_root's symlink-escape check uses
+# for sensitive write targets, so a credential filename is only defined once.
+_CREDENTIAL_FILENAME_PATTERN = "|".join(
+    re.escape(name) for name in sorted(_SENSITIVE_TARGET_FILE_NAMES)
+)
+
 # Illustrative, not exhaustive -- the same posture as scan_repo_root's tiered
 # severity. These are well-documented destructive/exfiltration shapes checked
 # against the *normalized* (post-quote-removal) command, not the raw text.
+# The setuid/credential-write entries were added 2026-07-25 after reading
+# GuardFall's actual disclosed bypass corpus (Adversa AI, The Hacker News),
+# not just a research digest of it -- see the module comment above
+# `assess_shell_command` for the full validation-pass note.
 _DENYLIST_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("world_writable_chmod", re.compile(r"\bchmod\s+(-R\s+)?0?777\b")),
     ("raw_disk_write", re.compile(r"\bdd\s+.*\bof=/dev/(sd|nvme|disk|hd)\w*")),
@@ -409,12 +441,40 @@ _DENYLIST_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "credential_file_read",
         re.compile(r"\b(cat|less|more|head|tail)\s+.*(/etc/shadow|id_rsa\b)"),
     ),
+    # GuardFall Class E: `chmod +s file` / `chmod 4755 file` grants the
+    # setuid bit, letting a planted binary run as its owner regardless of who
+    # invokes it -- the mechanism behind GuardFall's `install -m 4755 payload
+    # /usr/local/bin/backdoor` example. Deliberately scoped to setuid (leading
+    # octal `4`), not setgid (`2`): `chmod 2775` on a directory is a common,
+    # benign sysadmin pattern (group-shared directories), while a 4-digit
+    # setuid grant on a file is not something a normal build/agent task does.
+    ("setuid_grant", re.compile(r"\bchmod\s+(-R\s+)?(\S*\+s\b|4[0-7]{3}\b)")),
+    ("setuid_install", re.compile(r"\binstall\b.*-m\s*4[0-7]{3}\b")),
+    # GuardFall's own "real organization example": `rm -rf` isn't the only
+    # way to destroy a credential file -- overwriting it in place is just as
+    # effective and easier to miss. Matches `sed -i 's/key=.../' ~/.aws/credentials`.
+    (
+        "credential_file_write",
+        re.compile(
+            rf"\b(sed\s+(-i\S*|--in-place\S*)|tee)\b.*\b({_CREDENTIAL_FILENAME_PATTERN})\b"
+        ),
+    ),
 )
 
 # Fetch-then-execute is dangerous regardless of quoting tricks: piping a
 # network download straight into an interpreter with no chance to inspect it.
 _FETCH_COMMANDS = {"curl", "wget"}
 _SHELL_INTERPRETERS = {"sh", "bash", "zsh", "dash", "ksh", "python", "python3", "perl", "node"}
+
+# GuardFall's "encoded pipeline" class: `echo <base64> | base64 -d | sh` looks
+# like harmless text transformation followed by execution, but the decode
+# step is what turns an opaque blob into a real, runnable payload -- the same
+# "danger only visible after a transform the filter doesn't model" shape as
+# fetch-then-execute, just with an encode/decode utility standing in for the
+# network. Only the *decode* direction is dangerous (`base64` with no `-d` is
+# the encode direction, `xxd` with no `-r` dumps hex, neither is executable
+# output), so both require their decode flag to be present.
+_DECODE_FLAGS = {"-d", "-D", "--decode"}
 
 # `rm`'s dangerous shape depends on which flags are present, not their order
 # or whether they are combined (`-rf`) or separate (`-r -f`), so it is checked
@@ -580,6 +640,25 @@ def _unquoted_variable_expansions(text: str) -> list[str]:
     return found
 
 
+def _is_sensitive_rm_target(target: str) -> bool:
+    """True for a filesystem root, a known system-directory prefix, or a
+    path that reaches a known sensitive dir/file name (e.g.
+    ``$HOME/.aws/credentials``, ``~/.ssh/id_rsa``) -- reuses the same
+    sensitive-name lists ``scan_repo_root``'s symlink-escape check uses,
+    rather than only matching a bare ``$HOME``/``~`` with nothing after it.
+    GuardFall's own cited real-world exploitation was exactly this shape:
+    ``rm -rf "$HOME/.aws/credentials"`` in a Makefile ``clean`` target.
+    Deliberately does not treat every path under ``$HOME``/``~`` as
+    sensitive -- that would flag common, benign cleanup like
+    ``rm -rf ~/some-cache-dir`` too."""
+    if target in _RM_SENSITIVE_TARGETS or target.startswith(_RM_SENSITIVE_TARGET_PREFIXES):
+        return True
+    segments_lower = {seg.lower() for seg in re.split(r"[\\/]", target) if seg}
+    if segments_lower & _SENSITIVE_TARGET_DIR_NAMES:
+        return True
+    return target.rsplit("/", 1)[-1].lower() in _SENSITIVE_TARGET_FILE_NAMES
+
+
 def _rm_recursive_force_sensitive_target(tokens: list[str]) -> bool:
     """True if ``tokens`` is an ``rm`` invocation with both a recurse flag
     (``-r``/``-R``) and a force flag (``-f``), targeting a filesystem root or
@@ -599,10 +678,7 @@ def _rm_recursive_force_sensitive_target(tokens: list[str]) -> bool:
         else:
             targets.append(tok)
     forceful = "r" in flag_chars and "f" in flag_chars
-    sensitive = any(
-        t in _RM_SENSITIVE_TARGETS or t.startswith(_RM_SENSITIVE_TARGET_PREFIXES)
-        for t in targets
-    )
+    sensitive = any(_is_sensitive_rm_target(t) for t in targets)
     return forceful and sensitive
 
 
@@ -615,19 +691,38 @@ def _naive_split(segment: str) -> list[str]:
     return segment.split()
 
 
-def _is_pipe_to_interpreter(
-    prev_tokens: list[str], op: str | None, next_tokens: list[str]
-) -> bool:
-    """True if a network fetch (``curl``/``wget``) is piped directly into a
-    shell/language interpreter with no chance to inspect the downloaded
-    content first."""
-    if op != "|" or not prev_tokens or not next_tokens:
+def _is_decode_command(tokens: list[str]) -> bool:
+    """True if ``tokens`` invokes ``base64``/``xxd`` in its decode direction."""
+    if not tokens:
         return False
+    cmd = tokens[0].rsplit("/", 1)[-1]
+    if cmd == "base64":
+        return any(t in _DECODE_FLAGS for t in tokens[1:])
+    if cmd == "xxd":
+        return any(t == "-r" for t in tokens[1:])
+    return False
+
+
+def _pipe_to_interpreter_reason(
+    prev_tokens: list[str], op: str | None, next_tokens: list[str]
+) -> str | None:
+    """Return a finding-type string if content is piped directly into a
+    shell/language interpreter with no chance to inspect it first -- either a
+    network fetch (``curl``/``wget``) or an encoded-payload decode
+    (``base64 -d``, ``xxd -r``). Returns ``None`` if neither shape matches."""
+    if op != "|" or not prev_tokens or not next_tokens:
+        return None
     prev_cmd = prev_tokens[0].rsplit("/", 1)[-1]
     next_cmd = next_tokens[0].rsplit("/", 1)[-1]
     if next_cmd == "sudo" and len(next_tokens) > 1:
         next_cmd = next_tokens[1].rsplit("/", 1)[-1]
-    return prev_cmd in _FETCH_COMMANDS and next_cmd in _SHELL_INTERPRETERS
+    if next_cmd not in _SHELL_INTERPRETERS:
+        return None
+    if prev_cmd in _FETCH_COMMANDS:
+        return "pipe_fetched_content_to_interpreter"
+    if _is_decode_command(prev_tokens):
+        return "pipe_decoded_content_to_interpreter"
+    return None
 
 
 def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
@@ -658,8 +753,10 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
       ``effective_command``, and any findings for that segment.
     - ``substitutions``: extracted ``$(...)``/backtick constructs, each with
       a recursive ``nested_assessment``.
-    - ``pipe_findings``: cross-segment findings (currently: piping a fetch
-      command straight into an interpreter).
+    - ``pipe_findings``: cross-segment findings -- piping a fetch command
+      (``pipe_fetched_content_to_interpreter``) or an encoded-payload decode
+      like ``base64 -d``/``xxd -r`` (``pipe_decoded_content_to_interpreter``)
+      straight into an interpreter.
     - ``bypassed_raw_pattern_match``: ``True`` if a normalized segment
       matched a denylist pattern that the *raw*, un-normalized segment text
       did not -- the concrete evidence that this closed a real bypass rather
@@ -758,16 +855,15 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
     pipe_findings: list[dict[str, object]] = []
     for idx in range(len(raw_split) - 1):
         _, op = raw_split[idx]
-        if _is_pipe_to_interpreter(parsed_tokens[idx], op, parsed_tokens[idx + 1]):
+        reason = _pipe_to_interpreter_reason(parsed_tokens[idx], op, parsed_tokens[idx + 1])
+        if reason:
             pair = [
                 logical_commands[idx]["raw_segment"],
                 logical_commands[idx + 1]["raw_segment"],
             ]
-            pipe_findings.append(
-                {"type": "pipe_fetched_content_to_interpreter", "segments": pair}
-            )
+            pipe_findings.append({"type": reason, "segments": pair})
             for lc in (logical_commands[idx], logical_commands[idx + 1]):
-                lc["findings"].append("pipe_fetched_content_to_interpreter")  # type: ignore[union-attr]
+                lc["findings"].append(reason)  # type: ignore[union-attr]
                 lc["risk"] = "dangerous"
 
     overall = sub_risk
