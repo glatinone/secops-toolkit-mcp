@@ -120,10 +120,15 @@ def assess_shell_command(command: str) -> dict[str, object]:
     decode piped straight into an interpreter (``curl ... | sh``,
     ``base64 -d | sh``), setuid grants (``chmod +s``, ``install -m 4755``),
     and in-place credential-file overwrites (``sed -i``/``tee`` targeting
-    ``~/.aws/credentials`` and similar). Returns ``risk`` (``safe``,
-    ``suspicious``, or ``dangerous``), per-segment findings, and
-    ``bypassed_raw_pattern_match`` -- concrete evidence a normalized segment
-    caught something the raw text alone would have missed.
+    ``~/.aws/credentials`` and similar). Also flags the shell-level shape of
+    Cursor's DuneSlide disclosure (CVE-2026-50548/50549): a symlink whose
+    target or link name lands on a sensitive path (``ln -s ~/.ssh/id_rsa
+    ./notes.txt``), and a ``cd`` into a sensitive directory chained with a
+    further command that would act on relative paths inside it (``cd
+    ~/.aws && cat credentials``). Returns ``risk`` (``safe``, ``suspicious``,
+    or ``dangerous``), per-segment findings, and ``bypassed_raw_pattern_match``
+    -- concrete evidence a normalized segment caught something the raw text
+    alone would have missed.
     """
     return core.assess_shell_command(command)
 

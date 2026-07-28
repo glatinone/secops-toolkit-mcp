@@ -161,6 +161,20 @@ assess_shell_command("echo cm0gLXJmIC8= | base64 -d | sh")
 # The base64 blob decodes to "rm -rf /" -- decoding it is what turns opaque
 # text into an executable payload, the same "danger only visible after a
 # transform the filter doesn't model" shape as piping a fetch into a shell.
+
+assess_shell_command("cd ~/.ssh && cat authorized_keys")
+# {'command': 'cd ~/.ssh && cat authorized_keys', 'risk': 'dangerous',
+#  'logical_commands': [
+#    {'raw_segment': 'cd ~/.ssh', 'tokens': ['cd', '~/.ssh'],
+#     'findings': ['cd_into_sensitive_directory'], 'risk': 'dangerous', ...},
+#    {'raw_segment': 'cat authorized_keys', 'tokens': ['cat', 'authorized_keys'],
+#     'findings': [], 'risk': 'safe', ...}
+#  ], 'cd_findings': [{'type': 'cd_into_sensitive_directory',
+#                       'segments': ['cd ~/.ssh', 'cat authorized_keys']}], ...}
+# A bare "cd ~/.ssh" alone would be safe -- nothing acts on it yet. Chained
+# with a further command, the second segment's own relative-path filename
+# ("authorized_keys" alone, no path prefix) would slip past every other
+# check here, since none of them know the effective working directory changed.
 ```
 
 From an MCP client, the same calls happen through natural language, for
@@ -246,6 +260,11 @@ command is what gets checked, not the raw string. It also:
 - Flags setuid grants (`chmod +s`, `chmod 4755`, `install -m 4755`) and
   overwriting a credential file in place (`sed -i`/`tee` targeting
   `~/.aws/credentials`, `~/.ssh/authorized_keys`, and similar).
+- Flags a symlink whose target *or* link name lands on a sensitive path
+  (`ln -s ~/.ssh/id_rsa ./notes.txt`), and a `cd` into a sensitive directory
+  chained with a further command that would act on relative paths inside it
+  (`cd ~/.aws && cat credentials`) — the shell-level shape of Cursor's
+  DuneSlide disclosure (see below).
 
 It never executes the command, or any part of it, at any point — this is
 static text analysis, not a sandbox. Returns `risk` (`safe`, `suspicious`, or
@@ -271,6 +290,39 @@ computes the *command name itself* (`$(echo rm) -rf /`) can only be flagged
 see what it produces — and running untrusted code to decide whether it's
 safe to run defeats the point. See `tests/test_core.py`'s "GuardFall
 disclosed corpus" section for the full payload-by-payload results.
+
+### Closing DuneSlide's shell-level shape
+
+Cursor's DuneSlide disclosure (CVE-2026-50548/50549, see the symlink-escape
+section above) is two write-sandbox escapes: an agent-controlled
+`working_directory` parameter that silently expands the writable-path
+allowlist, and a symlink whose target the sandbox trusts instead of
+rejecting when canonicalization fails. `scan_repo_root`'s symlink-escape
+check already finds a symlink *planted* in a repo before it's opened —
+but neither Cursor bug is about a pre-existing file; both are about what
+the agent's *own* command does mid-session, which is `assess_shell_command`'s
+job, not `scan_repo_root`'s.
+
+Checked structurally against parsed tokens, the same way as the `rm`
+sensitive-target check above (`ln`'s and `cd`'s flags vary too much for a
+single regex), reusing the same sensitive dir/file name list:
+
+- **`ln -s`/`ln --symbolic`**, when its target *or* its link name hits a
+  known-sensitive path (`.ssh`/`.aws`/`.gnupg`/`.docker`/`.kube`/`.azure`, or
+  a credential filename like `authorized_keys`/`id_rsa`) — either side can
+  be the sensitive one, since the attack's whole point is to make one side
+  look innocent.
+- **`cd` into a known-sensitive directory**, only when chained (`&&`, `;`,
+  a pipe, or a newline) with a further command — a bare `cd ~/.ssh` with
+  nothing acting on it afterward hasn't done anything yet, the same
+  "danger is in the combination" posture `pipe_findings` already uses for
+  fetch-piped-to-interpreter.
+
+A plain hard link (`ln` with no `-s`) is a structurally different, lower-risk
+operation and stays out of scope. Both checks tokenize with the same quote-
+removal and `$IFS`-expansion rules as everything else in this function, so
+`l'n' -s ~/.ssh/authorized_keys ./x` and `cd$IFS~/.aws && cat credentials`
+are caught too, not just the unobfuscated form.
 
 ## Run with Docker
 
@@ -348,6 +400,12 @@ tool, and [CHANGELOG.md](CHANGELOG.md) for release history.
   gaps found this way: encoded pipelines (`base64 -d | sh`, `xxd -r | sh`)
   and alternative destructive-utility shapes (setuid grants, in-place
   credential-file overwrites, `$HOME`/`~`-relative sensitive rm targets)
+- [x] `assess_shell_command` widened for Cursor's DuneSlide disclosure
+  (v0.8.0): flags an agent-issued `ln -s`/`ln --symbolic` targeting (or
+  named after) a sensitive path, and a `cd` into a sensitive directory
+  chained with a further command — the shell-level shape of both
+  CVE-2026-50548 (`working_directory` abuse) and CVE-2026-50549 (symlink
+  canonicalization bypass)
 - [ ] Widen `scan_repo_root`'s shadowed-name/extension coverage, its
   sensitive-target symlink list, and `assess_shell_command`'s denylist
   patterns as real-world use surfaces gaps; all three are intentionally

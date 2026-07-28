@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-28
+
+### Added
+
+- `assess_shell_command`: widened for Cursor's DuneSlide disclosure
+  (CVE-2026-50548/50549, read directly from Apolo Cybersecurity's and The
+  Hacker News's write-ups). DuneSlide is two write-sandbox escapes inside
+  Cursor's own tool implementation; this closes the shell-level shape of
+  both, expressed as commands an agent could issue rather than Cursor's
+  internal parameters:
+  - **Symlink creation**: `ln -s`/`ln --symbolic` is now flagged
+    `dangerous` when its target *or* its link name hits a known-sensitive
+    dir/file name (`.ssh`, `.aws`, `authorized_keys`, `id_rsa`, and
+    similar, reusing the same list `scan_repo_root`'s symlink-escape check
+    and `assess_shell_command`'s `rm` check already use). Checking both
+    positional arguments is deliberate — the attack's whole point is to
+    make one side look innocent. A plain hard link (no `-s`) stays out of
+    scope. New `symlink_to_sensitive_target` finding.
+  - **Working-directory redirection**: a `cd` into a known-sensitive
+    directory is now flagged `dangerous` when chained (`&&`, `;`, a pipe,
+    or a newline) with a further command — a bare `cd ~/.ssh` with
+    nothing acting on it afterward hasn't done anything yet, the same
+    "danger is in the combination" posture `pipe_findings` already uses.
+    New cross-segment `cd_findings` list and `cd_into_sensitive_directory`
+    finding type.
+  - Both checks are structural (parsed tokens, not regex) and go through
+    the same quote-removal and `$IFS`-expansion normalization as every
+    other check in this function, so `l'n' -s ~/.ssh/authorized_keys ./x`
+    and `cd$IFS~/.aws && cat credentials` are caught too.
+  - `scan_repo_root`'s existing symlink-escape check (v0.6.0) already
+    covers a symlink *planted* in a repo before it's opened; this closes
+    the separate case of the agent's own shell command creating one
+    mid-session, or redirecting its own working directory, which is
+    `assess_shell_command`'s job.
+  - 12 new tests, all passing (85 passing total, was 73).
+
 ## [0.7.0] - 2026-07-25
 
 ### Added
@@ -165,7 +201,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `password_entropy`, `cidr_info`, `ip_in_cidr` tools over FastMCP. Never tagged
   on GitHub — `0.2.0` is this project's first tagged release.
 
-[Unreleased]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.4.0...v0.5.0

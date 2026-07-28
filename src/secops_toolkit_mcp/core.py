@@ -411,6 +411,22 @@ def ip_in_cidr(ip: str, cidr: str) -> bool:
 # That would mean executing untrusted code to decide if it's safe to execute,
 # defeating the point; the existing suspicious-not-dangerous treatment of any
 # substitution is the correct, honest answer here, not a gap to fix.
+#
+# 2026-07-28: Cursor's DuneSlide disclosure (CVE-2026-50548/50549, read
+# directly from Apolo Cybersecurity's and The Hacker News's write-ups) showed
+# a prompt-injected agent escaping a write sandbox two ways: creating a
+# symlink whose target lands outside the intended scope, then writing
+# through the innocent-looking link name (CVE-2026-50549's canonicalization
+# bypass -- `scan_repo_root`'s symlink-escape check already finds a symlink
+# *planted* in a repo before it's opened, but not one the agent's own shell
+# command creates mid-session); and redirecting a command's effective
+# working directory into a sensitive location before running further,
+# relative-path commands (the same shape as CVE-2026-50548's
+# `working_directory`-parameter abuse, expressed at the shell level as a
+# plain `cd`). Both are checked structurally against parsed tokens -- `ln`'s
+# and `cd`'s flags vary too much for a single regex -- reusing the same
+# sensitive dir/file name lists `_is_sensitive_rm_target` already uses, so
+# the "what counts as sensitive" answer stays in one place.
 
 _RISK_ORDER = {"safe": 0, "suspicious": 1, "dangerous": 2}
 
@@ -682,6 +698,61 @@ def _rm_recursive_force_sensitive_target(tokens: list[str]) -> bool:
     return forceful and sensitive
 
 
+def _is_sensitive_cd_target(target: str) -> bool:
+    """True if a ``cd`` target is a known-sensitive directory name
+    (``.ssh``, ``.aws``, etc.) that legitimate scripts rarely change into
+    before running further commands. Deliberately narrower than
+    :func:`_is_sensitive_rm_target`: that function also treats a bare
+    ``~``/``$HOME``/``/`` as sensitive, which is correct for a *delete*
+    target but would make this check fire on every ordinary
+    ``cd ~ && ...`` in a benign script -- only the specific sensitive
+    directory names are checked here."""
+    segments_lower = {seg.lower() for seg in re.split(r"[\\/]", target) if seg}
+    return bool(segments_lower & _SENSITIVE_TARGET_DIR_NAMES)
+
+
+def _ln_symlink_sensitive_target(tokens: list[str]) -> bool:
+    """True if ``tokens`` is an ``ln -s``/``ln --symbolic`` invocation where
+    any positional argument -- the symlink's target, or the link name being
+    created -- hits a known sensitive dir/file name. Checking both sides is
+    deliberate: DuneSlide's technique is to give the *link* an innocent-
+    looking name while its *target* is the real credential file, but a
+    scanner can't assume which positional argument plays which role from
+    text alone, so either one landing on a sensitive name is worth flagging."""
+    if not tokens or tokens[0].rsplit("/", 1)[-1] != "ln":
+        return False
+    flag_chars: set[str] = set()
+    args: list[str] = []
+    literal_args = False
+    for tok in tokens[1:]:
+        if tok == "--":
+            literal_args = True
+            continue
+        if not literal_args and tok == "--symbolic":
+            flag_chars.add("s")
+            continue
+        if not literal_args and tok.startswith("-") and tok != "-":
+            flag_chars.update(tok.lstrip("-").lower())
+        else:
+            args.append(tok)
+    if "s" not in flag_chars:
+        return False
+    return any(_is_sensitive_rm_target(a) for a in args)
+
+
+def _cd_sensitive_target(tokens: list[str]) -> bool:
+    """True if ``tokens`` is a ``cd`` invocation into a known-sensitive
+    directory. Only the first positional argument is checked -- ``cd``
+    takes at most one path argument (a second word would be a shell error),
+    so there is no ambiguity about which token is the target."""
+    if not tokens or tokens[0].rsplit("/", 1)[-1] != "cd":
+        return False
+    args = [t for t in tokens[1:] if not (t.startswith("-") and t != "-")]
+    if not args:
+        return False
+    return _is_sensitive_cd_target(args[0])
+
+
 def _naive_split(segment: str) -> list[str]:
     """Whitespace-only split with no quote-removal -- what a raw-text
     command-name check would see, quote characters and all. Used solely as
@@ -757,6 +828,17 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
       (``pipe_fetched_content_to_interpreter``) or an encoded-payload decode
       like ``base64 -d``/``xxd -r`` (``pipe_decoded_content_to_interpreter``)
       straight into an interpreter.
+    - ``cd_findings``: cross-segment findings for a ``cd`` into a known-
+      sensitive directory (``.ssh``, ``.aws``, and similar) followed by a
+      chained command that would then act on relative paths inside it
+      (``cd_into_sensitive_directory``) -- the shell-level shape of Cursor's
+      DuneSlide ``working_directory`` abuse (CVE-2026-50548).
+    - A per-segment ``symlink_to_sensitive_target`` finding fires when an
+      ``ln -s``/``ln --symbolic`` invocation's target or link name hits a
+      known-sensitive dir/file name -- the shell-level precursor to
+      DuneSlide's symlink-canonicalization bypass (CVE-2026-50549): an agent
+      creates the symlink itself, rather than one already being planted in
+      the repo (which ``scan_repo_root``'s symlink-escape check covers).
     - ``bypassed_raw_pattern_match``: ``True`` if a normalized segment
       matched a denylist pattern that the *raw*, un-normalized segment text
       did not -- the concrete evidence that this closed a real bypass rather
@@ -779,6 +861,7 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
     raw_split = _split_logical_commands(placeholder_text)
     logical_commands: list[dict[str, object]] = []
     parsed_tokens: list[list[str]] = []
+    ifs_tokens_list: list[list[str]] = []
     any_bypassed_raw = False
 
     for segment, _op in raw_split:
@@ -818,6 +901,8 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
             # Already recognizable without any quote-removal, so a normalized
             # match below is not evidence of a closed bypass.
             raw_hits.add("recursive_root_delete")
+        if _ln_symlink_sensitive_target(_naive_split(segment)):
+            raw_hits.add("symlink_to_sensitive_target")
 
         normalized_hits = {
             name for name, pat in _DENYLIST_PATTERNS if pat.search(effective_command)
@@ -829,6 +914,8 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
             tokens
         ) or _rm_recursive_force_sensitive_target(ifs_tokens):
             normalized_hits.add("recursive_root_delete")
+        if _ln_symlink_sensitive_target(tokens) or _ln_symlink_sensitive_target(ifs_tokens):
+            normalized_hits.add("symlink_to_sensitive_target")
 
         bypassed_raw = sorted(normalized_hits - raw_hits)
         if bypassed_raw:
@@ -851,6 +938,7 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
             }
         )
         parsed_tokens.append(tokens)
+        ifs_tokens_list.append(ifs_tokens)
 
     pipe_findings: list[dict[str, object]] = []
     for idx in range(len(raw_split) - 1):
@@ -866,10 +954,33 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
                 lc["findings"].append(reason)  # type: ignore[union-attr]
                 lc["risk"] = "dangerous"
 
+    # A bare `cd` into a sensitive directory with nothing chained after it
+    # doesn't itself read, write, or exfiltrate anything -- only flagged when
+    # a following logical command exists to act on the now-relative paths,
+    # the same "danger is in the combination" posture as pipe_findings above.
+    cd_findings: list[dict[str, object]] = []
+    for idx in range(len(raw_split) - 1):
+        if _cd_sensitive_target(parsed_tokens[idx]) or _cd_sensitive_target(
+            ifs_tokens_list[idx]
+        ):
+            cd_findings.append(
+                {
+                    "type": "cd_into_sensitive_directory",
+                    "segments": [
+                        logical_commands[idx]["raw_segment"],
+                        logical_commands[idx + 1]["raw_segment"],
+                    ],
+                }
+            )
+            logical_commands[idx]["findings"].append(  # type: ignore[union-attr]
+                "cd_into_sensitive_directory"
+            )
+            logical_commands[idx]["risk"] = "dangerous"
+
     overall = sub_risk
     for lc in logical_commands:
         overall = _max_risk(overall, str(lc["risk"]))
-    if pipe_findings:
+    if pipe_findings or cd_findings:
         overall = "dangerous"
 
     return {
@@ -878,5 +989,6 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
         "logical_commands": logical_commands,
         "substitutions": findings,
         "pipe_findings": pipe_findings,
+        "cd_findings": cd_findings,
         "bypassed_raw_pattern_match": any_bypassed_raw,
     }

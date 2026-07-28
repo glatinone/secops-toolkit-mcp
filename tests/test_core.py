@@ -595,3 +595,88 @@ def test_guardfall_corpus_alternative_disk_write_utility_still_covered():
     # checks.
     result = core.assess_shell_command("dd if=payload of=/dev/sda")
     assert result["risk"] == "dangerous"
+
+
+# --- DuneSlide-inspired checks (CVE-2026-50548/50549) -----------------------
+#
+# Cursor's DuneSlide disclosure showed a prompt-injected agent escaping a
+# write sandbox by (a) creating a symlink whose target lands outside the
+# intended scope, then writing through the innocent-looking link name, and
+# (b) redirecting its effective working directory into a sensitive location
+# before running further, relative-path commands. These tests check the
+# shell-level analogue of both shapes in `assess_shell_command` (not
+# `scan_repo_root`, which already covers a symlink *planted* in a repo
+# before it's opened -- see the symlink-escape tests above).
+
+
+def test_duneslide_flags_symlink_target_pointing_at_ssh_key():
+    result = core.assess_shell_command("ln -s ~/.ssh/id_rsa ./notes.txt")
+    assert result["risk"] == "dangerous"
+    assert "symlink_to_sensitive_target" in result["logical_commands"][0]["normalized_denylist_hits"]
+
+
+def test_duneslide_flags_symlink_link_name_pointing_at_ssh_dir():
+    # The target can look innocent while the *link name* is the sensitive
+    # path -- either positional argument matters.
+    result = core.assess_shell_command("ln -s ./payload.txt ~/.ssh/authorized_keys")
+    assert result["risk"] == "dangerous"
+
+
+def test_duneslide_flags_symlink_via_long_flag_to_system_path():
+    result = core.assess_shell_command("ln --symbolic /etc/passwd ./readme")
+    assert result["risk"] == "dangerous"
+
+
+def test_duneslide_flags_symlink_to_bare_credential_filename():
+    result = core.assess_shell_command("ln -s ../creds/authorized_keys ./notes.txt")
+    assert result["risk"] == "dangerous"
+
+
+def test_duneslide_symlink_to_ordinary_path_is_not_flagged():
+    result = core.assess_shell_command("ln -s ./src/foo.py ./dist/foo.py")
+    assert result["risk"] == "safe"
+
+
+def test_duneslide_hardlink_without_symbolic_flag_is_not_flagged():
+    # A hard link (no `-s`) is a structurally different, lower-risk
+    # operation -- deliberately out of scope for this check.
+    result = core.assess_shell_command("ln ~/.ssh/id_rsa ./copy")
+    assert result["risk"] == "safe"
+
+
+def test_duneslide_catches_quote_fragmented_ln_bypass():
+    result = core.assess_shell_command("l'n' -s ~/.ssh/authorized_keys ./x")
+    assert result["risk"] == "dangerous"
+    assert result["bypassed_raw_pattern_match"] is True
+
+
+def test_duneslide_flags_cd_into_ssh_dir_when_chained_with_further_command():
+    result = core.assess_shell_command("cd ~/.ssh && cat authorized_keys")
+    assert result["risk"] == "dangerous"
+    assert result["cd_findings"][0]["type"] == "cd_into_sensitive_directory"
+
+
+def test_duneslide_bare_cd_into_sensitive_dir_with_nothing_chained_is_not_flagged():
+    # Nothing acts on the sensitive directory in this command line, so
+    # there's nothing to flag yet -- the same "danger is in the
+    # combination" posture as pipe_findings.
+    result = core.assess_shell_command("cd ~/.ssh")
+    assert result["risk"] == "safe"
+    assert result["cd_findings"] == []
+
+
+def test_duneslide_cd_into_ordinary_directory_chained_is_not_flagged():
+    result = core.assess_shell_command("cd /tmp/build && make")
+    assert result["risk"] == "safe"
+
+
+def test_duneslide_flags_cd_into_aws_dir_via_ifs_bypass():
+    result = core.assess_shell_command("cd$IFS~/.aws && cat credentials")
+    assert result["risk"] == "dangerous"
+    assert result["cd_findings"][0]["type"] == "cd_into_sensitive_directory"
+
+
+def test_duneslide_flags_cd_into_ssh_dir_via_quote_fragmentation():
+    result = core.assess_shell_command("c'd' ~/.ssh && cat id_rsa")
+    assert result["risk"] == "dangerous"
+    assert result["cd_findings"][0]["type"] == "cd_into_sensitive_directory"
