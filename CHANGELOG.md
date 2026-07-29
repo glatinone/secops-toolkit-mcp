@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-29
+
+### Added
+
+- `assess_shell_command`: widened for Cursor's Terminal Tool Allowlist
+  Bypass (CVE-2026-22708, read directly from the GitHub Security Advisory
+  GHSA-82wg-qcm4-fp2w and Pillar Security's technical write-up, not a
+  research digest). A structurally distinct bypass shape from GuardFall
+  and DuneSlide: a command allowlist that validates *which external
+  binary runs* never inspects shell builtins, so `export`, `typeset`,
+  `declare`, `readonly`, and `local` execute unconditionally and can
+  poison a behavior-redirecting environment variable that a later,
+  separately-approved command then respects.
+  - New `env_poisoning_assignment` finding: flags `export`/`typeset`/
+    `declare`/`readonly`/`local` assigning `PAGER`, `BROWSER`,
+    `PYTHONWARNINGS`, or `PERL5OPT` — the four variables confirmed in the
+    disclosure's own PoC chain (`PAGER`/`BROWSER` hijack `git branch`/
+    `man ls`/a URL-opener; `PYTHONWARNINGS`/`PERL5OPT` chain into
+    arbitrary Python/Perl execution). Flagged `dangerous` on its own, with
+    no chained follow-up command required — unlike the DuneSlide `cd`
+    check, the poisoning persists in the calling agent's shell session
+    and is typically triggered by a separate tool call this function
+    can't see. Checked structurally against parsed tokens, so
+    `e'x'port PAGER=payload` is caught the same as the unobfuscated form.
+  - New `zsh_forced_parameter_expansion` finding: flags zsh's
+    `${(e):-...}` parameter-expansion flag, which forces evaluation of
+    its default value even inside single quotes — the disclosure's
+    zero-click PoC (`typeset -i ${(e):-'$(open -a Calculator)'}`) and a
+    bypass of the single-quote-disables-expansion assumption this
+    module's own command-substitution extraction relies on elsewhere.
+    Flagged `suspicious` (a construct whose real effect can't be
+    determined from text alone), not `dangerous`, since `(e)` also has
+    legitimate uses.
+  - Deliberately out of scope: `unset`/`set`, also named in the
+    disclosure as bypassing the allowlist, but neither carries a
+    `VAR=value` assignment the way the five builtins above do; and
+    `LD_PRELOAD`, a well-known dangerous variable elsewhere but not part
+    of this disclosure's own confirmed PoC payloads.
+  - 11 new tests (96 passing, was 85; 6 still skip on symlink-privilege-
+    restricted dev machines, unrelated pre-existing condition).
+
 ## [0.8.0] - 2026-07-28
 
 ### Added
@@ -201,7 +242,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `password_entropy`, `cidr_info`, `ip_in_cidr` tools over FastMCP. Never tagged
   on GitHub — `0.2.0` is this project's first tagged release.
 
-[Unreleased]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/glatinone/secops-toolkit-mcp/compare/v0.5.0...v0.6.0

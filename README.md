@@ -23,7 +23,7 @@ Built with [FastMCP](https://github.com/jlowin/fastmcp).
 | `cidr_info` | Describe a CIDR network: netmask, host range, size, privacy. |
 | `ip_in_cidr` | Check whether an IP falls inside a CIDR range. |
 | `scan_repo_root` | Check a repo's top-level directory for files that shadow common dev command names (`git.exe`, `node.exe`, etc.), and the whole tree for symlinks that resolve outside the repo, before you open it in an agentic coding tool. |
-| `assess_shell_command` | Assess a shell command for constructs (quote fragmentation, command substitution, IFS tricks, encoded pipelines, setuid grants) that look benign to naive string matching but execute something else once a shell expands them. |
+| `assess_shell_command` | Assess a shell command for constructs (quote fragmentation, command substitution, IFS tricks, encoded pipelines, setuid grants, env-var poisoning via `export`/`typeset`/`declare`) that look benign to naive string matching but execute something else once a shell expands them. |
 
 > These are **defensive / analysis** utilities — parsing, hashing, and network
 > math. They don't scan, attack, or reach out to any host.
@@ -175,6 +175,20 @@ assess_shell_command("cd ~/.ssh && cat authorized_keys")
 # with a further command, the second segment's own relative-path filename
 # ("authorized_keys" alone, no path prefix) would slip past every other
 # check here, since none of them know the effective working directory changed.
+
+assess_shell_command("export PAGER='open -a Calculator'")
+# {'command': "export PAGER='open -a Calculator'", 'risk': 'dangerous',
+#  'logical_commands': [
+#    {'raw_segment': "export PAGER='open -a Calculator'",
+#     'tokens': ['export', 'PAGER=open -a Calculator'],
+#     'findings': ['denylisted_pattern'],
+#     'normalized_denylist_hits': ['env_poisoning_assignment'],
+#     'risk': 'dangerous', ...}
+#  ], ...}
+# Flagged even with nothing chained after it -- unlike "cd ~/.ssh", a
+# poisoned PAGER persists in the calling agent's shell session and can be
+# triggered by a later, separately-approved command ("git branch", "man ls")
+# this function never sees, since each call only assesses one command string.
 ```
 
 From an MCP client, the same calls happen through natural language, for
@@ -265,6 +279,10 @@ command is what gets checked, not the raw string. It also:
   chained with a further command that would act on relative paths inside it
   (`cd ~/.aws && cat credentials`) — the shell-level shape of Cursor's
   DuneSlide disclosure (see below).
+- Flags `export`/`typeset`/`declare`/`readonly`/`local` assigning a
+  behavior-redirecting variable (`PAGER`, `BROWSER`, `PYTHONWARNINGS`,
+  `PERL5OPT`), and zsh's zero-click `${(e):-...}` forced-parameter-expansion
+  construct — Cursor's Terminal Tool Allowlist Bypass disclosure (see below).
 
 It never executes the command, or any part of it, at any point — this is
 static text analysis, not a sandbox. Returns `risk` (`safe`, `suspicious`, or
@@ -323,6 +341,53 @@ operation and stays out of scope. Both checks tokenize with the same quote-
 removal and `$IFS`-expansion rules as everything else in this function, so
 `l'n' -s ~/.ssh/authorized_keys ./x` and `cd$IFS~/.aws && cat credentials`
 are caught too, not just the unobfuscated form.
+
+### Closing CVE-2026-22708's env-poisoning shape
+
+Cursor's Terminal Tool Allowlist Bypass (CVE-2026-22708, fixed in 2.3) is a
+third, distinct bypass mechanism: a command allowlist validates *which
+external binary runs*, but shell builtins aren't external binaries, so
+`export`, `typeset`, `declare`, `readonly`, and `local` execute unconditionally
+regardless of what's on the allowlist. An attacker (via prompt injection) uses
+one of them to poison an environment variable a later, separately-approved
+command reads — `PAGER` hijacks `git branch`/`man ls`, `BROWSER` hijacks a
+URL-opening command, `PYTHONWARNINGS`/`PERL5OPT` chain into arbitrary
+Python/Perl execution the next time those interpreters run. None of this
+requires ever executing a disallowed command string.
+
+`assess_shell_command` flags an `export`/`typeset`/`declare`/`readonly`/`local`
+invocation that assigns one of these variables as `dangerous` on its own —
+deliberately *not* requiring a chained follow-up command in the same string,
+unlike the DuneSlide `cd` check above. A poisoned `PAGER` persists in the
+calling agent's shell session; the command that actually gets hijacked is
+usually issued in a later, separate tool call this function has no visibility
+into, so the poisoning step itself is what has to be caught:
+
+```python
+assess_shell_command("export PAGER='open -a Calculator'")
+# risk: dangerous — flagged even though nothing in *this* command string
+# reads PAGER back yet.
+```
+
+The disclosure's PoC also included a zero-click variant with no `export` step
+at all: zsh's `${(e):-...}` parameter-expansion flag forces evaluation of its
+default value even when that value is single-quoted —
+`typeset -i ${(e):-'$(open -a Calculator)'}` runs the embedded command despite
+the quotes that would normally disable expansion, bypassing the same
+single-quote assumption this function's own command-substitution extraction
+relies on elsewhere. Flagged as `zsh_forced_parameter_expansion`, a construct
+whose real effect can't be determined from the text alone — the same honest
+treatment as `ifs_manipulation`/`ansi_c_quoting`, not overclaimed as
+`dangerous` on its own since `(e)` also has legitimate, non-malicious uses.
+
+Deliberately out of scope: `unset` and `set`, which the same disclosure also
+names as bypassing the allowlist, but neither can carry a `VAR=value`
+assignment the way `export`/`typeset`/`declare`/`readonly`/`local` do —
+`unset` only removes a variable, and `set` (without `-o`) manipulates
+positional parameters, not the environment. And `LD_PRELOAD`, a well-known
+dangerous variable elsewhere, isn't in this list since it wasn't part of this
+disclosure's own confirmed PoC payloads — added only if a future disclosure
+or real-world case demonstrates it.
 
 ## Run with Docker
 
@@ -406,6 +471,14 @@ tool, and [CHANGELOG.md](CHANGELOG.md) for release history.
   chained with a further command — the shell-level shape of both
   CVE-2026-50548 (`working_directory` abuse) and CVE-2026-50549 (symlink
   canonicalization bypass)
+- [x] `assess_shell_command` widened for Cursor's Terminal Tool Allowlist
+  Bypass (v0.9.0, CVE-2026-22708): flags `export`/`typeset`/`declare`/
+  `readonly`/`local` assigning a behavior-redirecting variable (`PAGER`,
+  `BROWSER`, `PYTHONWARNINGS`, `PERL5OPT`) that a later, separately-approved
+  command would then respect — a structurally distinct bypass from the
+  GuardFall and DuneSlide shapes above, since it attacks what a trusted
+  command's *environment* inherits, not what command string runs. Also
+  flags zsh's zero-click `${(e):-...}` forced-parameter-expansion construct
 - [ ] Widen `scan_repo_root`'s shadowed-name/extension coverage, its
   sensitive-target symlink list, and `assess_shell_command`'s denylist
   patterns as real-world use surfaces gaps; all three are intentionally

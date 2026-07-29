@@ -125,10 +125,15 @@ def assess_shell_command(command: str) -> dict[str, object]:
     target or link name lands on a sensitive path (``ln -s ~/.ssh/id_rsa
     ./notes.txt``), and a ``cd`` into a sensitive directory chained with a
     further command that would act on relative paths inside it (``cd
-    ~/.aws && cat credentials``). Returns ``risk`` (``safe``, ``suspicious``,
-    or ``dangerous``), per-segment findings, and ``bypassed_raw_pattern_match``
-    -- concrete evidence a normalized segment caught something the raw text
-    alone would have missed.
+    ~/.aws && cat credentials``). Also flags Cursor's Terminal Tool Allowlist
+    Bypass (CVE-2026-22708): ``export``/``typeset``/``declare``/``readonly``/
+    ``local`` assigning a behavior-redirecting variable (``PAGER``,
+    ``BROWSER``, ``PYTHONWARNINGS``, ``PERL5OPT``) that a later, separately-
+    approved command would then respect, plus zsh's zero-click ``${(e):-...}``
+    forced-parameter-expansion construct. Returns ``risk`` (``safe``,
+    ``suspicious``, or ``dangerous``), per-segment findings, and
+    ``bypassed_raw_pattern_match`` -- concrete evidence a normalized segment
+    caught something the raw text alone would have missed.
     """
     return core.assess_shell_command(command)
 

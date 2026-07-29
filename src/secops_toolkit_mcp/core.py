@@ -427,6 +427,32 @@ def ip_in_cidr(ip: str, cidr: str) -> bool:
 # and `cd`'s flags vary too much for a single regex -- reusing the same
 # sensitive dir/file name lists `_is_sensitive_rm_target` already uses, so
 # the "what counts as sensitive" answer stays in one place.
+#
+# 2026-07-29: Cursor's Terminal Tool Allowlist Bypass (CVE-2026-22708, read
+# directly from the GitHub Security Advisory GHSA-82wg-qcm4-fp2w and Pillar
+# Security's technical write-up, not a research digest) showed a third,
+# structurally distinct bypass shape: an allowlist that validates *which
+# external command runs* never inspects shell builtins at all, so
+# `export`/`typeset`/`declare`/`readonly`/`local` execute unconditionally and
+# can set a behavior-redirecting environment variable (`PAGER`, `BROWSER`,
+# `PYTHONWARNINGS`, `PERL5OPT`) that a later, separately-approved command
+# (`git branch`, `man ls`, `python3 script.py`) then respects -- turning it
+# into arbitrary code execution without ever running a disallowed command
+# string. This is checked the same way as the DuneSlide `ln`/`cd` checks
+# above: structurally, against parsed tokens, per logical segment, since the
+# poisoning assignment is itself the entire attack setup step and doesn't
+# need a chained follow-up command in the same string to be worth flagging
+# -- unlike `cd`, which is inert alone, a poisoned `PAGER` persists in the
+# calling agent's shell session and can be triggered by a command in a
+# future, separate tool call this function has no visibility into. Pillar's
+# write-up also disclosed a zero-click variant using zsh's `${(e):-...}`
+# parameter-expansion flag, which forces evaluation of its default value
+# even when that value is single-quoted (`typeset -i ${(e):-'$(open -a
+# Calculator)'}` runs the embedded command despite the quotes that would
+# normally disable expansion) -- a distinct bypass of the single-quote
+# assumption `_extract_command_substitutions` itself relies on, flagged as
+# a construct whose real effect can't be determined from the text alone,
+# the same posture as `ifs_manipulation`/`ansi_c_quoting` below.
 
 _RISK_ORDER = {"safe": 0, "suspicious": 1, "dangerous": 2}
 
@@ -753,6 +779,54 @@ def _cd_sensitive_target(tokens: list[str]) -> bool:
     return _is_sensitive_cd_target(args[0])
 
 
+# CVE-2026-22708: these builtins execute unconditionally inside Cursor's
+# Auto-Run allowlist because it only validates external binaries, never
+# shell builtins. Deliberately excludes `unset`/`set`, which the same
+# disclosure also names as bypassing the allowlist -- but neither can carry
+# a `VAR=value` assignment (`unset` only removes a variable, `set` without
+# `-o`/positional-parameter syntax doesn't set an environment variable the
+# way `export`/`typeset`/`declare`/`readonly`/`local` do), so they don't fit
+# this specific "poisoned with a known-dangerous value" check.
+_ENV_POISONING_BUILTINS = {"export", "typeset", "declare", "readonly", "local"}
+
+# Environment variables confirmed in Pillar Security's disclosed PoC chain
+# for CVE-2026-22708: `PAGER` hijacks `git branch`/`man ls` output paging,
+# `BROWSER` hijacks a URL-opening command, and `PYTHONWARNINGS`/`PERL5OPT`
+# chain into arbitrary Python/Perl code execution the next time those
+# interpreters run. Illustrative, not exhaustive -- same posture as every
+# other denylist in this module -- scoped to exactly what the disclosure's
+# own PoC demonstrated rather than a broader guess (e.g. `LD_PRELOAD` is a
+# well-known dangerous variable elsewhere but wasn't part of this
+# disclosure's confirmed payloads, so it's left out here).
+_ENV_POISONING_VARS = {"pager", "browser", "pythonwarnings", "perl5opt"}
+
+# zsh's `(e)` parameter-expansion flag forces its default-value expression
+# to be evaluated even inside single quotes, which normally disable all
+# expansion -- the mechanism behind CVE-2026-22708's zero-click PoC
+# (`typeset -i ${(e):-'$(open -a Calculator)'}`). Matches the flag list of
+# any `${(...)}` expansion containing `e`; illustrative of the one
+# disclosed shape, not every zsh flag combination.
+_ZSH_FORCED_EXPANSION = re.compile(r"\$\{\s*\([^)]*e[^)]*\)")
+
+
+def _env_poisoning_assignment(tokens: list[str]) -> bool:
+    """True if ``tokens`` is an ``export``/``typeset``/``declare``/
+    ``readonly``/``local`` invocation that assigns a known behavior-
+    redirecting environment variable (``PAGER``, ``BROWSER``,
+    ``PYTHONWARNINGS``, ``PERL5OPT``) a new value. A bare ``export PAGER``
+    (no ``=``) merely re-exports whatever the variable already holds and
+    isn't itself a poisoning act, so only tokens containing ``=`` count."""
+    if not tokens or tokens[0].rsplit("/", 1)[-1] not in _ENV_POISONING_BUILTINS:
+        return False
+    for tok in tokens[1:]:
+        if tok.startswith("-") or "=" not in tok:
+            continue
+        name = tok.split("=", 1)[0]
+        if name.lower() in _ENV_POISONING_VARS:
+            return True
+    return False
+
+
 def _naive_split(segment: str) -> list[str]:
     """Whitespace-only split with no quote-removal -- what a raw-text
     command-name check would see, quote characters and all. Used solely as
@@ -839,6 +913,21 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
       DuneSlide's symlink-canonicalization bypass (CVE-2026-50549): an agent
       creates the symlink itself, rather than one already being planted in
       the repo (which ``scan_repo_root``'s symlink-escape check covers).
+    - A per-segment ``env_poisoning_assignment`` finding fires when
+      ``export``/``typeset``/``declare``/``readonly``/``local`` assigns a
+      known behavior-redirecting variable (``PAGER``, ``BROWSER``,
+      ``PYTHONWARNINGS``, ``PERL5OPT``) -- CVE-2026-22708's allowlist-bypass
+      shape: these builtins run unconditionally past a command allowlist
+      that only validates external binaries, and the poisoned variable then
+      hijacks whatever later command reads it. Flagged on its own, with no
+      chained follow-up command required, since the poisoning persists in
+      the calling agent's shell session regardless of what appears in this
+      same command string.
+    - A per-segment ``zsh_forced_parameter_expansion`` finding flags zsh's
+      ``${(e):-...}``-style parameter expansion, which forces evaluation of
+      its default value even inside single quotes -- CVE-2026-22708's
+      zero-click variant, and a bypass of the single-quote assumption this
+      function's own command-substitution extraction otherwise relies on.
     - ``bypassed_raw_pattern_match``: ``True`` if a normalized segment
       matched a denylist pattern that the *raw*, un-normalized segment text
       did not -- the concrete evidence that this closed a real bypass rather
@@ -880,6 +969,8 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
             seg_findings.append("ifs_manipulation")
         if "$'" in segment:
             seg_findings.append("ansi_c_quoting")
+        if _ZSH_FORCED_EXPANSION.search(segment):
+            seg_findings.append("zsh_forced_parameter_expansion")
 
         # Default IFS is whitespace, so an unassigned `$IFS`/`${IFS}` is a
         # literal stand-in for a space -- a documented technique for evading
@@ -903,6 +994,8 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
             raw_hits.add("recursive_root_delete")
         if _ln_symlink_sensitive_target(_naive_split(segment)):
             raw_hits.add("symlink_to_sensitive_target")
+        if _env_poisoning_assignment(_naive_split(segment)):
+            raw_hits.add("env_poisoning_assignment")
 
         normalized_hits = {
             name for name, pat in _DENYLIST_PATTERNS if pat.search(effective_command)
@@ -916,6 +1009,8 @@ def assess_shell_command(command: str, _depth: int = 0) -> dict[str, object]:
             normalized_hits.add("recursive_root_delete")
         if _ln_symlink_sensitive_target(tokens) or _ln_symlink_sensitive_target(ifs_tokens):
             normalized_hits.add("symlink_to_sensitive_target")
+        if _env_poisoning_assignment(tokens) or _env_poisoning_assignment(ifs_tokens):
+            normalized_hits.add("env_poisoning_assignment")
 
         bypassed_raw = sorted(normalized_hits - raw_hits)
         if bypassed_raw:

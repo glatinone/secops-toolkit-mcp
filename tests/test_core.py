@@ -680,3 +680,83 @@ def test_duneslide_flags_cd_into_ssh_dir_via_quote_fragmentation():
     result = core.assess_shell_command("c'd' ~/.ssh && cat id_rsa")
     assert result["risk"] == "dangerous"
     assert result["cd_findings"][0]["type"] == "cd_into_sensitive_directory"
+
+
+# --- Env-var poisoning via shell builtins (CVE-2026-22708) ------------------
+#
+# Cursor's Terminal Tool Allowlist Bypass showed that a command allowlist
+# validating only external binaries lets `export`/`typeset`/`declare`/
+# `readonly`/`local` run unconditionally, poisoning an environment variable
+# (`PAGER`, `BROWSER`, `PYTHONWARNINGS`, `PERL5OPT`) that a later, separately-
+# approved command then respects. Verified directly against the GitHub
+# Security Advisory (GHSA-82wg-qcm4-fp2w) and Pillar Security's technical
+# write-up, not a research digest, before writing these tests.
+
+
+def test_env_poisoning_flags_bare_export_of_pager():
+    # Flagged on its own -- the poisoning persists in the calling agent's
+    # shell session regardless of what appears in this same command string,
+    # unlike `cd`, which is inert without a chained follow-up.
+    result = core.assess_shell_command("export PAGER='open -a Calculator'")
+    assert result["risk"] == "dangerous"
+    assert "env_poisoning_assignment" in result["logical_commands"][0]["normalized_denylist_hits"]
+
+
+def test_env_poisoning_flags_export_browser_chained_with_trusted_command():
+    result = core.assess_shell_command("export BROWSER=/tmp/evil.sh && git branch")
+    assert result["risk"] == "dangerous"
+
+
+def test_env_poisoning_flags_typeset_perl5opt():
+    result = core.assess_shell_command("typeset PERL5OPT=-Mfoo")
+    assert result["risk"] == "dangerous"
+
+
+def test_env_poisoning_flags_declare_pythonwarnings():
+    result = core.assess_shell_command("declare PYTHONWARNINGS=ignore::antigravity")
+    assert result["risk"] == "dangerous"
+
+
+def test_env_poisoning_flags_readonly_and_local_variants():
+    assert core.assess_shell_command("readonly PAGER=/tmp/payload")["risk"] == "dangerous"
+    assert core.assess_shell_command("local BROWSER=/tmp/payload")["risk"] == "dangerous"
+
+
+def test_env_poisoning_catches_quote_fragmented_export_bypass():
+    result = core.assess_shell_command("e'x'port PAGER=payload")
+    assert result["risk"] == "dangerous"
+    assert result["bypassed_raw_pattern_match"] is True
+
+
+def test_env_poisoning_ignores_benign_variable_assignment():
+    result = core.assess_shell_command("export MY_APP_CONFIG=production")
+    assert result["risk"] == "safe"
+
+
+def test_env_poisoning_ignores_bare_reexport_with_no_new_value():
+    # `export PAGER` with no `=` re-exports whatever the variable already
+    # holds -- not itself a poisoning act.
+    result = core.assess_shell_command("export PAGER")
+    assert result["risk"] == "safe"
+
+
+def test_env_poisoning_unset_is_out_of_scope():
+    # `unset` is also named in the disclosure as bypassing the allowlist,
+    # but it removes a variable rather than assigning a poisoned value, so
+    # it doesn't fit this specific check.
+    result = core.assess_shell_command("unset PAGER")
+    assert result["risk"] == "safe"
+
+
+def test_zsh_forced_expansion_flagged_as_suspicious_construct():
+    # The zero-click PoC: zsh's `(e)` flag forces evaluation of the default
+    # value even though it's single-quoted, bypassing the assumption
+    # elsewhere in this module that single quotes disable all expansion.
+    result = core.assess_shell_command("typeset -i ${(e):-'$(open -a Calculator)'}")
+    assert result["risk"] == "suspicious"
+    assert "zsh_forced_parameter_expansion" in result["logical_commands"][0]["findings"]
+
+
+def test_zsh_ordinary_parameter_expansion_without_e_flag_not_flagged():
+    result = core.assess_shell_command("echo ${(L)name}")
+    assert "zsh_forced_parameter_expansion" not in result["logical_commands"][0]["findings"]
