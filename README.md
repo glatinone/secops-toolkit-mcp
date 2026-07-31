@@ -189,6 +189,21 @@ assess_shell_command("export PAGER='open -a Calculator'")
 # poisoned PAGER persists in the calling agent's shell session and can be
 # triggered by a later, separately-approved command ("git branch", "man ls")
 # this function never sees, since each call only assesses one command string.
+
+assess_shell_command("typeset -i ${(e):-'$(open -a Calculator)'}")
+# {'command': "typeset -i ${(e):-'$(open -a Calculator)'}", 'risk': 'suspicious',
+#  'logical_commands': [
+#    {'raw_segment': "typeset -i ${(e):-'$(open -a Calculator)'}",
+#     'tokens': ['typeset', '-i', '${(e):-$(open -a Calculator)}'],
+#     'effective_command': 'typeset -i ${(e):-$(open -a Calculator)}',
+#     'findings': ['zsh_forced_parameter_expansion'],
+#     'raw_denylist_hits': [], 'normalized_denylist_hits': [],
+#     'risk': 'suspicious'}
+#  ], 'substitutions': [], 'pipe_findings': [], 'bypassed_raw_pattern_match': False}
+# Flagged "suspicious", not "dangerous": zsh's (e) flag forces evaluation of the
+# default value even though it's single-quoted, so the embedded $(open -a
+# Calculator) runs anyway -- but (e) also has legitimate non-malicious uses,
+# so this function can't claim certainty from the text alone.
 ```
 
 From an MCP client, the same calls happen through natural language, for
